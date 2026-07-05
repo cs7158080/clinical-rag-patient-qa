@@ -1,23 +1,44 @@
 [project]
-name = "lesson2-rag-embedding"
+name = "clinical-rag"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "annoy>=1.17.3",
-    "anthropic>=0.109.2",
-    "cohere>=7.0.4",
-    "dotenv>=0.9.9",
-    "gradio>=6.19.0",
-    "llama-index>=0.14.22",
-    "python-docx>=1.2.0",
-    "pyyaml>=6.0.3",
-    "python-dotenv>=1.0",
-    "pyyaml>=6.0",
-    "llama-index-core>=0.11",
-    "llama-index-vector-stores-pinecone",
-    "llama-index-llms-anthropic",
-    "pinecone-client>=3.0",
-    "netfree-unstrict-ssl>=0.1.3",
+    "llama-index-core>=0.10.0",
+    "llama-index-llms-anthropic>=0.3.0",
+    "llama-index-embeddings-cohere>=0.2.0",
+    "anthropic>=0.30.0",
+    "cohere>=5.0.0",
+    "pinecone>=3.0.0",
+    "python-docx>=1.1.0",
+    "transformers>=4.40.0",
+    "onnxruntime>=1.18.0",
+    "gradio>=4.0.0",
+    "pyyaml>=6.0.0",
+    "python-dotenv>=1.0.0",
+    "numpy>=1.24.0",
+    "nest-asyncio>=1.6.0",
+    "reportlab>=5.0.0",
+    "python-bidi>=0.6.11",
 ]
 
-[tool.uv]
+[project.optional-dependencies]
+setup = [
+    "optimum[exporters]>=1.19.0",
+    "torch>=2.1.0,<2.6.0",
+    "hf_xet>=0.1.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

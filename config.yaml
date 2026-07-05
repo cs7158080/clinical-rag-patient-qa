@@ -1,0 +1,24 @@
+patients_root: "C:/SpeechTherapy/clients"
+data_dir: "./data"
+logs_dir: "./logs"
+models_dir: "./models"
+
+pinecone:
+  index_name: "rag-index"
+  dimension: 1024
+
+cohere:
+  model: "embed-multilingual-v3.0"
+
+anthropic:
+  extraction_model: "claude-haiku-4-5-20251001"
+  generation_model: "claude-haiku-4-5-20251001"
+  temperature_extraction: 0
+  temperature_generation: 0.2
+
+logging:
+  level: "INFO"
+  retention_days: 7
+
+evaluation:
+  enabled: false

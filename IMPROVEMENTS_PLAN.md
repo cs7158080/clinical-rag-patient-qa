@@ -1,4 +1,0 @@
-# Improvements & Known Bugs
-
-## Bugs
-
