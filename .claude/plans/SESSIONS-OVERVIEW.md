@@ -13,12 +13,27 @@ and queried via Claude Haiku through a Gradio UI. Full architecture: `PLAN.md` (
 
 ## Session order and scope
 
-| # | Session | Plan file | Scope |
-|---|---------|-----------|-------|
-| 1 | Privacy & Safety | `session-1-privacy-safety.md` | NER wiring + fail-closed, PII written to DB by generate flow, leftover PII logs, localhost binding |
-| 2 | Summary Generation Redesign | `session-2-summary-generation.md` | Document built from base-document copy, exact template formatting, domain findings merge, treatment-oriented headings, remove PDF |
-| 3 | Answer Quality & Routing | `session-3-answers-routing.md` | Dates missing from LLM context, latest-document fetch bug, Q&A max_tokens, full routing review |
-| 4 | Ops & Cleanup | `session-4-ops-cleanup.md` | Pinecone index rename, project-wide logging, start.bat warnings, Cohere embedding batching (96/call), full PLAN.md rewrite |
+| # | Session | Plan file | Scope | Status |
+|---|---------|-----------|-------|--------|
+| 1 | Privacy & Safety | `session-1-privacy-safety.md` | NER wiring + fail-closed, PII written to DB by generate flow, leftover PII logs, localhost binding | ✅ done 2026-07-09 |
+| 2 | Summary Generation Redesign | `session-2-summary-generation.md` | Document built from base-document copy, exact template formatting, domain findings merge, treatment-oriented headings, remove PDF | pending |
+| 3 | Answer Quality & Routing | `session-3-answers-routing.md` | Dates missing from LLM context, latest-document fetch bug, Q&A max_tokens, full routing review | pending |
+| 4 | Ops & Cleanup | `session-4-ops-cleanup.md` | Pinecone index rename, project-wide logging, start.bat warnings, Cohere embedding batching (96/call), full PLAN.md rewrite | pending |
+
+### Session 1 results (2026-07-09)
+
+- **A1** — `run_mode` added to `config.yaml` + `AppConfig`; NER gate at `run_ingestion` entry
+  (production = fail-closed with Hebrew error, test = warning); Pass 2 NER re-scan fails closed
+  in production. All acceptance tests passed.
+- **A2** — generate flow now stores tokenized sections in SQLite
+  (`ReidentifiedDocEvent.tokenized_sections`); re-identified text only in the `.docx`.
+- **A3** — found already fixed by the user before the session (both PII logs removed).
+- **A4** — server binds to `127.0.0.1`.
+- **Cleanup** — user approved full wipe: SQLite DB + all Pinecone vectors deleted, everything
+  re-ingested through the fixed pipeline (10/10 ok; generated summary files had already been
+  deleted from disk by the user). `run_mode` is currently `"test"` — switch to `"production"`
+  after running `setup.bat` (the ONNX model has never been converted on this machine).
+- PLAN.md updated: Step 3 (Run Mode amendment), Step 7 (SQLite record wording), Step 9 (localhost).
 
 Session 2 depends on Session 1 (fix A2 must land first — see session 1). Sessions 3 and 4 are
 independent but should run after 1–2 to avoid merge noise.

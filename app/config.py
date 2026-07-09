@@ -61,6 +61,9 @@ class AppConfig:
     logs_dir: str
     models_dir: str
 
+    # "production" — fail-closed de-id gate | "test" — proceed without NER
+    run_mode: str
+
     # Sub-configs
     pinecone: PineconeConfig
     cohere: CohereConfig
@@ -159,12 +162,20 @@ def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppC
         enabled=bool(evaluation_raw.get("enabled", False)),
     )
 
-    # Step 5 — assemble root config
+    # Step 5 — validate run_mode, then assemble root config
+    run_mode = str(raw.get("run_mode", "test")).lower()
+    if run_mode not in ("production", "test"):
+        raise ValueError(
+            f"Invalid config key 'run_mode': '{run_mode}'. "
+            "Must be 'production' or 'test'."
+        )
+
     _config = AppConfig(
         patients_root=_require_key(raw, "patients_root", "patients_root"),
         data_dir=raw.get("data_dir", "./data"),
         logs_dir=raw.get("logs_dir", "./logs"),
         models_dir=raw.get("models_dir", "./models"),
+        run_mode=run_mode,
         pinecone=pinecone_cfg,
         cohere=cohere_cfg,
         anthropic=anthropic_cfg,

@@ -111,7 +111,8 @@ class TokenizedDocEvent(Event):
 
 
 class ReidentifiedDocEvent(Event):
-    sections: dict
+    sections: dict             # re-identified — for the .docx body only
+    tokenized_sections: dict   # de-identified — the ONLY version stored in SQLite
     patient_id: str
     date_to: str
     patient_name: str
@@ -229,6 +230,7 @@ class GenerateSummaryWorkflow(Workflow):
 
         return ReidentifiedDocEvent(
             sections=reidentified_sections,
+            tokenized_sections=ev.sections,
             patient_id=ev.patient_id,
             date_to=ev.date_to,
             patient_name=patient_name,
@@ -268,8 +270,9 @@ class GenerateSummaryWorkflow(Workflow):
         doc.save(buf)
         file_hash = hashlib.sha256(buf.getvalue()).hexdigest()
 
-        # Write de-identified sections to SQLite; session_date = date_to (last session in range)
-        for section_key, text in ev.sections.items():
+        # Write de-identified (tokenized) sections to SQLite — never the
+        # re-identified text; session_date = date_to (last session in range)
+        for section_key, text in ev.tokenized_sections.items():
             chunk = FamilyAChunk(
                 patient_id=ev.patient_id,
                 template_type='clinic_visit_summary',

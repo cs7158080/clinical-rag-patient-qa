@@ -31,6 +31,7 @@ from llama_index.core.workflow import (  # type: ignore
 )
 
 from ..deidentification.deid import deidentify_text, validate_name_variants
+from ..deidentification.ner import load_ner_model
 from ..deidentification.reid_map import (
     add_entity,
     patient_id_from_folder,
@@ -549,6 +550,22 @@ async def run_ingestion(
     list of (file_path, result_str) tuples — one per .docx file processed.
     result_str is one of: "ok", "skipped", "blocked:<reason>", "error:<reason>".
     """
+    # De-id gate: the NER model is mandatory in production (fail-closed).
+    try:
+        load_ner_model(config.models_dir)
+    except Exception as exc:
+        if config.run_mode == "production":
+            logger.error("run_ingestion: NER model failed to load: %s", exc)
+            raise RuntimeError(
+                "מודל ה-NER אינו זמין — טעינת קבצים חסומה במצב production. "
+                "יש להריץ setup.bat כדי להוריד ולהמיר את המודל."
+            ) from exc
+        logger.warning(
+            "run_ingestion: run_mode=test — NER model unavailable (%s). "
+            "Proceeding WITHOUT NER de-identification!",
+            exc,
+        )
+
     workflow = IngestionWorkflow(
         config=config,
         reid_map=reid_map,

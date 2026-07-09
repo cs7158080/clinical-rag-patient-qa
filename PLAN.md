@@ -317,6 +317,21 @@ PERSON token hash for the patient. A single re-identification map therefore serv
 
 If any check fails: the document is blocked, an error entry is written to the system log (document path and failure type, but no PII values), and the document does not proceed to embedding.
 
+### Run Mode — Amendment (Session 1, 2026-07-09)
+
+A top-level `run_mode` key in `config.yaml` controls the de-identification gate's
+failure behavior. Allowed values: `"production"` | `"test"`. A missing key defaults
+to `"test"`; any other value fails config loading with a clear error.
+
+- **production (fail-closed):** the NER model is loaded at the ingestion entry point
+  (`run_ingestion`). If it cannot be loaded, ingestion is blocked before any file is
+  processed, with a Hebrew error instructing the user to run `setup.bat`. Pass 2's
+  NER re-scan likewise **fails** validation (file blocked) when the model is not loaded.
+- **test:** ingestion proceeds without NER with a prominent WARNING in the log;
+  Pass 2's NER re-scan is skipped with a warning.
+
+The model is still never loaded for query-only usage (Step 9).
+
 ### Re-ingest
 
 - SQLite stores `file_hash` (SHA256 of file content) per source file.
@@ -586,7 +601,10 @@ Sequential number = scan patient folder for existing `סיכום ביקור` fil
 File contains real PII (re-identified). 
 
 **SQLite record:**
-De-identified version added to `family_a_sections` (template_type = 'clinic_visit_summary').
+The tokenized sections exactly as returned by the LLM — before re-identification — are
+written to `family_a_sections` (template_type = 'clinic_visit_summary'). The re-identified
+text exists only in the saved `.docx`. The generation workflow carries both versions to the
+save step for this purpose (Session 1 fix, 2026-07-09).
 Row inserted into `ingested_files` after serialization with the known hash → re-ingest skips this file.
 If the clinician edits the generated file, its hash changes and the file will be re-ingested on the next run through the full pipeline (including de-identification). This is the intended behavior and must not be treated as a special case.
 
@@ -885,6 +903,8 @@ GenerateStartEvent(patient_id, session_date)
 
 **UI:** Gradio — persistent server. Detail deferred to Step 10.
 **Launch:** `start.bat` → `uv run python -m app.main` → available at `http://localhost:7860`.
+The Gradio server binds to `127.0.0.1` only — the app is never reachable from the LAN
+(decided 2026-07-09; no authentication layer needed for now).
 **NER model:** loaded once at ingestion startup as a module-level singleton in `ner.py`.
 Not loaded during query-only usage.
 

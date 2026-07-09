@@ -76,13 +76,25 @@ def _check_reid_map_values(text: str, reid_map: dict) -> bool:
 def _check_ner_rescan(text: str) -> bool:
     """Return True (clean) if NER finds no unreplaced PER/ORG entities.
 
-    Skipped entirely (returns True) when the NER model is not loaded.
+    When the NER model is not loaded the behavior depends on run_mode:
+    production — fail-closed (returns False, the file is blocked);
+    test       — skipped with a warning (returns True).
     An entity is acceptable only if its text matches the PERSON_xxx or INST_xxx
     token format — meaning it was already de-identified in Pass 1.
     """
     from .ner import extract_entities, is_model_loaded  # noqa: PLC0415
 
     if not is_model_loaded():
+        from ..config import get_config  # noqa: PLC0415
+        if get_config().run_mode == "production":
+            logger.error(
+                "validation: NER model is not loaded in production mode — "
+                "failing validation (fail-closed)."
+            )
+            return False
+        logger.warning(
+            "validation: NER model not loaded (test mode) — skipping NER re-scan."
+        )
         return True
 
     try:
@@ -116,7 +128,8 @@ def validate_deidentified(text: str, reid_map: dict) -> ValidationResult:
     The first failure short-circuits — subsequent checks are not run.
 
     Returns a ValidationResult with passed=True only when all three checks
-    pass (or the NER model is not loaded, in which case ner_rescan is skipped).
+    pass. When the NER model is not loaded, ner_rescan fails in production
+    (fail-closed) and is skipped with a warning in test mode.
     """
     if not _check_regex_patterns(text):
         return ValidationResult(passed=False, failure_type="regex")
