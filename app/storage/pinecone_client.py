@@ -176,9 +176,6 @@ def get_cohere_query_embedding(text: str, api_key: str, model: str) -> list[floa
     import cohere  # type: ignore
 
     co = cohere.ClientV2(api_key)
-    logger.warning("=== COHERE QUERY EMBED ===")
-    logger.warning("text=%r", text)
-    logger.warning("texts=%r", [text])
     logger.warning("model=%r", model)
     response = co.embed(texts=[text], model=model, input_type="search_query", embedding_types=["float"])
     embedding: list[float] = response.embeddings.float_[0]

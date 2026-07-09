@@ -197,11 +197,9 @@ class IngestionWorkflow(Workflow):
         self, ctx: Context, ev: ParsedEvent
     ) -> Union[DeidentifiedEvent, BlockedEvent]:
         """Validate name variants, apply Pass 1 de-identification, run Pass 2 gate."""
-        logger.info(ev.parsed_data)
 
         patient_folder_name = ev.parsed_data["patient_folder_name"]
         file_path = ev.parsed_data["file_path"]
-        logger.info(ev.parsed_data.get("header", {}).get("name"))
 
         # Validate name variants from the three sources
         header_name = ev.parsed_data.get("header", {}).get("name")
@@ -332,7 +330,6 @@ class IngestionWorkflow(Workflow):
         self, ctx: Context, ev: FamilyAStoreEvent
     ) -> StopEvent:
         """Write Family A sections and domain findings to SQLite."""
-        logger.info(ev.parsed_data)
 
         data = ev.parsed_data
         patient_id: str = data["patient_id"]

@@ -133,6 +133,7 @@ class GenerateSummaryWorkflow(Workflow):
             model=config.anthropic.generation_model,
             api_key=config.anthropic_api_key,
             temperature=config.anthropic.temperature_generation,
+            max_tokens=10000
         )
 
     @step
