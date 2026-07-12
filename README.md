@@ -1,6 +1,17 @@
 # Clinical RAG — Patient Q&A System
 
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![LlamaIndex](https://img.shields.io/badge/LlamaIndex-RAG-0088CC)
+![Claude](https://img.shields.io/badge/LLM-Claude%20Haiku%204.5-D97757?logo=anthropic&logoColor=white)
+![Cohere](https://img.shields.io/badge/Embeddings-Cohere-39594D)
+![Pinecone](https://img.shields.io/badge/Vector%20DB-Pinecone-000000?logo=pinecone&logoColor=white)
+![Gradio](https://img.shields.io/badge/UI-Gradio-F97316?logo=gradio&logoColor=white)
+
 A retrieval-augmented generation system for a speech-language pathology clinic. The system allows the clinician to ask natural-language questions in Hebrew about patient records and receive grounded answers drawn directly from the patient files.
+
+## Why I built this
+
+A speech-language clinic I work with was managing patient records as a folder of `.docx` files per patient — diagnosis reports, visit summaries, treatment plans — searched by hand whenever a clinician needed to answer a question like "what treatment approach did we agree on in March?" or "which sessions covered articulation exercises?". I built this as a real tool for that clinic: a Hebrew-language Q&A system that retrieves and grounds its answers strictly in the patient's own documents, with a hard requirement that no real patient data ever leaves the local machine in identifiable form — everything is de-identified before indexing and re-identified only when displaying the final answer back to the clinician.
 
 ## Purpose
 
@@ -9,6 +20,18 @@ Patient data is stored as `.docx` files organized in a folder per patient. The s
 Supported document types: diagnosis reports, clinic visit summaries, treatment plans.
 
 All patient data is de-identified before leaving the local machine. Real names and identifiers are stored in a local re-identification map and are re-applied to answers after generation.
+
+## Demo
+
+> Screenshots below use fully synthetic patient data created for demonstration purposes — no real patient information appears in this repository.
+
+**Ask a question in Hebrew, get an answer grounded in the patient's documents:**
+
+![Q&A tab](docs/screenshots/demo-qa-tab.png)
+
+**Generate a clinic visit summary document from a date range:**
+
+![Generate summary tab](docs/screenshots/demo-summary-tab.png)
 
 ## Setup (first run)
 
