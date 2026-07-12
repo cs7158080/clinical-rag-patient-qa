@@ -235,13 +235,12 @@ class IngestionWorkflow(Workflow):
                 )
             deid_data["sections"] = deid_sections
 
-            if ev.template_type == "diagnosis":
-                deid_domains: dict[str, str] = {}
-                for domain, text in deid_data.get("domains", {}).items():
-                    deid_domains[domain] = deidentify_text(
-                        text, patient_folder_name, variants, self._reid_map, file_path
-                    )
-                deid_data["domains"] = deid_domains
+            deid_domains: dict[str, str] = {}
+            for domain, text in deid_data.get("domains", {}).items():
+                deid_domains[domain] = deidentify_text(
+                    text, patient_folder_name, variants, self._reid_map, file_path
+                )
+            deid_data["domains"] = deid_domains
 
         elif ev.template_type == "treatment_plan":
             deid_goals = []
@@ -275,6 +274,7 @@ class IngestionWorkflow(Workflow):
         # Pass 2 validation — collect all de-identified text fields
         all_texts = (
             list(deid_data.get("sections", {}).values())
+            + list(deid_data.get("domains", {}).values())
             + [r["goals_text"] for r in deid_data.get("goals_rows", [])]
             + [b["session_text"] for b in deid_data.get("session_blocks", [])]
         )
@@ -368,19 +368,18 @@ class IngestionWorkflow(Workflow):
             )
             insert_family_a_chunk(self._db_path, chunk)
 
-        # Insert domain findings (diagnosis only)
-        if template_type == "diagnosis":
-            parent_domains: dict = data.get("parent_domains", {})
+        # Insert domain findings (both Family A types)
+        parent_domains: dict = data.get("parent_domains", {})
 
-            for domain_name, domain_text in data.get("domains", {}).items():
-                finding = DomainFinding(
-                    patient_id=patient_id,
-                    session_date=session_date,
-                    domain_name=domain_name,
-                    domain_text_deidentified=domain_text,
-                    parent_domain=parent_domains.get(domain_name),
-                )
-                insert_domain_finding(self._db_path, finding)
+        for domain_name, domain_text in data.get("domains", {}).items():
+            finding = DomainFinding(
+                patient_id=patient_id,
+                session_date=session_date,
+                domain_name=domain_name,
+                domain_text_deidentified=domain_text,
+                parent_domain=parent_domains.get(domain_name),
+            )
+            insert_domain_finding(self._db_path, finding)
 
         mark_file_ingested(self._db_path, file_path, data["file_hash"])
         save_reid_map(

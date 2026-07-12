@@ -17,14 +17,12 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "numpy>=1.24.0",
     "nest-asyncio>=1.6.0",
-    "reportlab>=5.0.0",
-    "python-bidi>=0.6.11",
 ]
 
 [project.optional-dependencies]
 setup = [
     "optimum[exporters]>=1.19.0",
-    "torch>=2.1.0,<2.6.0",
+    "torch>=2.6.0,<2.9.0",
     "hf_xet>=0.1.0",
 ]
 dev = [

@@ -150,12 +150,9 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
             result = await run_generate_summary(patient_id, date_from, date_to, config, db_path, reid_map_path)
             try:
                 paths = json.loads(result)
-                lines = []
                 if paths.get("docx"):
-                    lines.append(f"DOCX: {paths['docx']}")
-                if paths.get("pdf"):
-                    lines.append(f"PDF:  {paths['pdf']}")
-                return "\n".join(lines) if lines else result
+                    return f"הסיכום נוצר: {paths['docx']}"
+                return result
             except (json.JSONDecodeError, TypeError):
                 return result
         except Exception as e:

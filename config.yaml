@@ -20,6 +20,7 @@ anthropic:
   generation_model: "claude-haiku-4-5-20251001"
   temperature_extraction: 0
   temperature_generation: 0.2
+  max_tokens_generation: 10000
 
 logging:
   level: "INFO"

@@ -16,7 +16,7 @@ and queried via Claude Haiku through a Gradio UI. Full architecture: `PLAN.md` (
 | # | Session | Plan file | Scope | Status |
 |---|---------|-----------|-------|--------|
 | 1 | Privacy & Safety | `session-1-privacy-safety.md` | NER wiring + fail-closed, PII written to DB by generate flow, leftover PII logs, localhost binding | ✅ done 2026-07-09 |
-| 2 | Summary Generation Redesign | `session-2-summary-generation.md` | Document built from base-document copy, exact template formatting, domain findings merge, treatment-oriented headings, remove PDF | pending |
+| 2 | Summary Generation Redesign | `session-2-summary-generation.md` | Document built from base-document copy, exact template formatting, domain findings merge, treatment-oriented headings, remove PDF | ✅ done 2026-07-10 |
 | 3 | Answer Quality & Routing | `session-3-answers-routing.md` | Dates missing from LLM context, latest-document fetch bug, Q&A max_tokens, full routing review | pending |
 | 4 | Ops & Cleanup | `session-4-ops-cleanup.md` | Pinecone index rename, project-wide logging, start.bat warnings, Cohere embedding batching (96/call), full PLAN.md rewrite | pending |
 
@@ -34,6 +34,29 @@ and queried via Claude Haiku through a Gradio UI. Full architecture: `PLAN.md` (
   deleted from disk by the user). `run_mode` is currently `"test"` — switch to `"production"`
   after running `setup.bat` (the ONNX model has never been converted on this machine).
 - PLAN.md updated: Step 3 (Run Mode amendment), Step 7 (SQLite record wording), Step 9 (localhost).
+
+### Session 2 results (2026-07-10) — branch `session-2-summary-generation`
+
+- **B1** — `anthropic.max_tokens_generation: 10000` in config.yaml + AppConfig.
+- **B4** — parse failure raises `GenerationParseError` → Hebrew error + raw LLM output logged;
+  silent empty-document fallback removed.
+- **B2** — new `app/generation/docx_builder.py`: skeleton = copy of the base document's physical
+  file, fallback = `tamplates/טמפליט אבחון בנים.docx` (the up-to-date template; בנות is unused);
+  section bodies replaced in place, headings re-worded (מהלך/ממצאי הטיפול, הנדון אבחון→טיפול),
+  תמצית deleted; domain findings rendered as bold sub-headings; formatting inherited via
+  pPr/rPr cloning. Domains flow end-to-end: adapter + pipeline extract/store them for
+  clinic_visit_summary too; generation sends them as a separate JSON key (ממצאי_תחומים) and
+  writes them back to `domain_findings`.
+- **B3** — PDF removed (`_save_pdf`, reportlab, python-bidi; `uv sync` run — note it also
+  uninstalled the `setup` extras torch/optimum; `setup.bat` reinstalls them when needed).
+- Generated filename is now `סיכום טיפול N <name>.docx`; the adapter no longer recognises
+  `סיכום ביקור`. File hash now computed from the bytes written to disk (single serialization).
+- Extra approved fixes: Pass 2 validation now covers domain texts; adapter signature sentinel
+  extended (paragraph starting with בברכה stops section collection).
+- Verified by a smoke test (template + base-document skeletons, full re-ingest round-trip);
+  pytest: only the 2 known routing failures (Session 3) remain.
+- PLAN.md updated: Step 2 (family_a_sections note, domain_findings schema + both types,
+  section-headers amendment), Step 7 (Generate redesign, error-handling row).
 
 Session 2 depends on Session 1 (fix A2 must land first — see session 1). Sessions 3 and 4 are
 independent but should run after 1–2 to avoid merge noise.
@@ -68,11 +91,8 @@ independent but should run after 1–2 to avoid merge noise.
 - Findings explicitly de-prioritized by the user: generated-file hash double-serialization,
   same-date session overwrite, failing router tests (superseded by the Session 3 routing review).
 
-## Known uncommitted work-tree state (as of writing)
+## Known uncommitted work-tree state (updated 2026-07-10)
 
-- `app/generation/summary_generator.py` — user added `max_tokens=10000` to the LLM constructor.
-- `app/ingestion/pipeline.py` — user removed one debug log (two PII logs remain, see Session 1).
-- `app/storage/pinecone_client.py` — user removed Cohere debug logs.
-
-Nothing has been committed since `b75f138`. Discuss committing checkpoints with the user at
+All Session 2 changes live uncommitted on branch `session-2-summary-generation`
+(code + PLAN.md + this file). Discuss committing checkpoints with the user at
 each session end (do not commit without being asked).
