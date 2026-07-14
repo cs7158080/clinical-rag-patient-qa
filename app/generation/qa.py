@@ -11,7 +11,7 @@ from app.storage.models import QueryParams, RetrievalResult
 from app.deidentification.reid_map import reidentify_text, load as load_reid_map
 from app.prompts.qa import (
     SUMMARIZE_PROMPT, FIND_SPECIFIC_PROMPT, CHECK_DOMAIN_PROMPT,
-    COMPARE_PROGRESS_PROMPT, FAMILY_A_PROMPT,
+    COMPARE_PROGRESS_PROMPT, PROGRESS_TREND_PROMPT, FAMILY_A_PROMPT,
     NO_RESULTS_MESSAGE, ERROR_MESSAGE, CANT_UNDERSTAND_MESSAGE,
     REID_MAP_MISSING_WARNING
 )
@@ -101,6 +101,10 @@ class QueryWorkflow(Workflow):
                     context_after=after_text,
                     question=question,
                 )
+            elif params.intent == 'compare_progress':
+                # Dateless progress question — chunks is a chronological list
+                context = '\n---\n'.join(result.chunks)
+                prompt = PROGRESS_TREND_PROMPT.format(context=context, question=question)
             elif params.intent == 'check_domain':
                 context = '\n---\n'.join(result.chunks)
                 prompt = CHECK_DOMAIN_PROMPT.format(domain=params.topic or '', context=context, question=question)
@@ -120,6 +124,7 @@ class QueryWorkflow(Workflow):
             answer = response.text.strip()
             if not answer:
                 return TokenizedAnswerEvent(answer=ERROR_MESSAGE)
+            logger.info(f"Getting response:{answer}")
             return TokenizedAnswerEvent(answer=answer)
         except Exception as e:
             logger.error(f"LLM generation error: {e}")

@@ -121,6 +121,9 @@ def _check_ner_rescan(text: str) -> bool:
 # Main gate
 # ---------------------------------------------------------------------------
 
+_TOKEN_SCRUB = re.compile(r"(?:PERSON|INST|ID|PHONE|EMAIL)_[0-9a-f]{64}")
+
+
 def validate_deidentified(text: str, reid_map: dict) -> ValidationResult:
     """Run all three de-identification validation checks in order.
 
@@ -131,6 +134,11 @@ def validate_deidentified(text: str, reid_map: dict) -> ValidationResult:
     pass. When the NER model is not loaded, ner_rescan fails in production
     (fail-closed) and is skipped with a warning in test mode.
     """
+    # Mask tokens first — they are trusted placeholders, and their 64-char
+    # hex content otherwise trips the checks (NER tags hex fragments as PER,
+    # and digit-only map values can substring-match inside the hex).
+    text = _TOKEN_SCRUB.sub(" ", text)
+
     if not _check_regex_patterns(text):
         return ValidationResult(passed=False, failure_type="regex")
 

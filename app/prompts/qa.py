@@ -24,6 +24,9 @@ If the information is insufficient — say so explicitly.
 Tokens such as PERSON_xxx and INST_xxx are names of people and organizations — use them naturally.
 Write dates in Hebrew (for example: "7 במרץ 2025").
 Format your response as plain text, one item per line — do not use numbered or bulleted lists.
+Keep every line short and easy to scan — one fact or observation per line, at most
+~12 words. Split a long sentence into several short lines rather than writing one
+long, dense sentence.
 assume that the context you recieved is within the time range desired by the user.
 You must provide an answer that is as detailed as possible and includes as much information as possible - based solely on the information I have given you."""
 
@@ -69,6 +72,17 @@ Records after {date_ref}:
 Question: {question}
 
 Compare the progress before and after the date."""
+
+PROGRESS_TREND_PROMPT = QA_SYSTEM_BASE + """
+
+The following are the patient's treatment records in chronological order (earliest first):
+{context}
+
+Question: {question}
+
+Describe the progression over time: the starting point, what changed along the way,
+and where things stand in the most recent sessions. Anchor every observation to its
+session date."""
 
 FAMILY_A_PROMPT = QA_SYSTEM_BASE + """
 

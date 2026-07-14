@@ -40,10 +40,11 @@ def deidentify_text(
 
     Steps applied in order
     ----------------------
-    1. Patient name replacement — deterministic, using the folder name and all
-       accepted variants.  Only full-name strings (first + last) are replaced.
-    2. Hebrew NER — detects additional PER (other persons) and ORG (institutions)
-       entities in the remaining text. Skipped if NER model is not loaded.
+    1. Hebrew NER — detects PER (persons) and ORG (institutions) entities on
+       the RAW text, so offsets are valid and the model never sees tokens.
+       Skipped if NER model is not loaded.
+    2. Patient name replacement — deterministic, using the folder name, all
+       accepted variants, and each single word of the folder name.
     3. Regex replacement — national ID (9-digit), phone, email.
 
     Parameters
@@ -61,20 +62,12 @@ def deidentify_text(
     De-identified text string.
     """
     # ------------------------------------------------------------------
-    # Step 1 — patient name pre-replacement (deterministic)
+    # Step 1 — Hebrew NER for persons and institutions.
+    # Runs FIRST, on the raw text: entity offsets stay valid, and the model
+    # never sees replacement tokens (their hex content confuses it).
     # ------------------------------------------------------------------
     patient_token = add_entity(reid_map, "PERSON", patient_folder_name)
 
-    for variant in name_variants:
-        if not variant or not variant.strip():
-            continue
-        # Replace full-name occurrences (case-insensitive).
-        # re.escape is used so names with special regex characters are safe.
-        text = re.sub(re.escape(variant), patient_token, text, flags=re.IGNORECASE)
-
-    # ------------------------------------------------------------------
-    # Step 2 — Hebrew NER for additional persons and institutions
-    # ------------------------------------------------------------------
     if is_model_loaded():
         try:
             entities = extract_entities(text)
@@ -90,6 +83,24 @@ def deidentify_text(
         for entity in entities_sorted:
             entity_text = entity["text"]
             entity_label = entity["label"]
+
+            start = entity["start"]
+            end = entity["end"]
+
+            # Guard against model noise: a real Hebrew name has at least two
+            # characters and at least one Hebrew letter, and is word-aligned —
+            # subword fragments (e.g. "רה" inside "ואמרה") mangle regular
+            # words when their span is replaced.
+            if (
+                len(entity_text.strip()) < 2
+                or not re.search(r"[֐-׿]", entity_text)
+            ):
+                continue
+            if (start > 0 and text[start - 1].isalpha()) or (
+                end < len(text) and text[end].isalpha()
+            ):
+                continue
+
 
             if entity_label == "PER":
                 token = add_entity(reid_map, "PERSON", entity_text)
@@ -112,6 +123,26 @@ def deidentify_text(
             text = text[:start] + token + text[end:]
 
     # ------------------------------------------------------------------
+    # Step 2 — deterministic patient-name replacement
+    # ------------------------------------------------------------------
+    for variant in name_variants:
+        if not variant or not variant.strip():
+            continue
+        # Replace full-name occurrences (case-insensitive).
+        # re.escape is used so names with special regex characters are safe.
+        text = re.sub(re.escape(variant), patient_token, text, flags=re.IGNORECASE)
+
+    # Each word of the canonical patient name (first / last name alone) —
+    # clinical notes usually use the first name, which NER catches only
+    # sometimes. Each word gets its own token so re-identification restores
+    # the exact original text.
+    for word in patient_folder_name.split():
+        if len(word) < 2:
+            continue
+        word_token = add_entity(reid_map, "PERSON", word)
+        text = re.sub(rf"\b{re.escape(word)}\b", word_token, text)
+
+    # ------------------------------------------------------------------
     # Step 3 — regex-based PII replacement
     # ------------------------------------------------------------------
     # National ID (9-digit sequences)
@@ -132,6 +163,31 @@ def deidentify_text(
 
     text = re.sub(EMAIL_REGEX, _replace_email, text)
 
+    return text
+
+
+def sweep_reid_values(text: str, reid_map: dict) -> str:
+    """Final deterministic sweep — replace any known re-id map value still
+    present in *text* with its token.
+
+    Mirrors the Pass 2 reid_map substring check exactly, so a value that
+    would fail validation is replaced instead of blocking the file. Handles
+    names NER caught in one block but missed in another. Longer values are
+    replaced first so full names win over their component words. Values that
+    are short or purely ASCII-alphanumeric are skipped: digits/IDs are already
+    handled by the structural regexes, and such values could otherwise match
+    inside token hex strings and corrupt them.
+
+    The PERSON_ prefix is safe for any entity type — re-identification
+    resolves tokens by hash, not by prefix.
+    """
+    for hash_hex, value in sorted(
+        reid_map.items(), key=lambda kv: len(kv[1] or ""), reverse=True
+    ):
+        if not value or len(value) < 2 or re.fullmatch(r"[0-9A-Za-z_]+", value):
+            continue
+        if value in text:
+            text = text.replace(value, f"PERSON_{hash_hex}")
     return text
 
 

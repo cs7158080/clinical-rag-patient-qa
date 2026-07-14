@@ -28,7 +28,7 @@ build/
 htmlcov/
 
 # IDE
-.vscode/settings.json
+.vscode/
 .idea/
 
 # OS

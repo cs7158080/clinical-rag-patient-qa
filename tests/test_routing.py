@@ -76,7 +76,7 @@ def test_route_summarize_clinic_visit_summary():
 
 
 def test_route_summarize_null_template():
-    """summarize + None template → error (user must specify template type)."""
+    """summarize + None template → treatment_sessions_sqlite (default: treatment sessions)."""
     params = QueryParams(
         patient_id=_PATIENT_ID,
         intent="summarize",
@@ -84,9 +84,7 @@ def test_route_summarize_null_template():
     )
     decision = route(params)
 
-    assert decision.strategy == "error"
-    assert decision.error_message is not None
-    assert len(decision.error_message) > 0
+    assert decision.strategy == "treatment_sessions_sqlite"
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +139,23 @@ def test_route_check_domain_all_fixed_domains():
 # Routing — find_specific intent
 # ---------------------------------------------------------------------------
 
-def test_route_find_specific():
-    """find_specific with any template type → pinecone (default semantic search)."""
+def test_route_find_specific_no_topic():
+    """find_specific without a topic → treatment_sessions_sqlite (nothing to embed)."""
     params = QueryParams(
         patient_id=_PATIENT_ID,
         intent="find_specific",
+    )
+    decision = route(params)
+
+    assert decision.strategy == "treatment_sessions_sqlite"
+
+
+def test_route_find_specific_with_topic():
+    """find_specific + free-text topic → pinecone (semantic search)."""
+    params = QueryParams(
+        patient_id=_PATIENT_ID,
+        intent="find_specific",
+        topic="צליל ר",
     )
     decision = route(params)
 
@@ -178,6 +188,17 @@ def test_route_compare_progress():
     decision = route(params)
 
     assert decision.strategy == "compare_sqlite"
+
+
+def test_route_compare_progress_no_date():
+    """compare_progress without date_from → treatment_sessions_sqlite (progress over time)."""
+    params = QueryParams(
+        patient_id=_PATIENT_ID,
+        intent="compare_progress",
+    )
+    decision = route(params)
+
+    assert decision.strategy == "treatment_sessions_sqlite"
 
 
 # ---------------------------------------------------------------------------

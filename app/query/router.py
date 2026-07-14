@@ -57,6 +57,17 @@ class RouteDecision:
     params: QueryParams
     error_message: str | None = None
 
+# Helper
+def _normalize_topic(topic: str | None) -> str | None:
+    """Strip surrounding whitespace and quote/punctuation marks for tolerant matching.
+
+    Cosmetic-only: does not correct spelling variants, only formatting noise
+    (stray quotes, trailing punctuation, extra whitespace) an LLM might add.
+    """
+    if topic is None:
+        return None
+    return topic.strip().strip(' \t\n"\'\u05f4\u05f3.,:;')
+
 
 # ---------------------------------------------------------------------------
 # Public routing function
@@ -71,7 +82,8 @@ def route(params: QueryParams) -> RouteDecision:
     --------------------|-----------------------------|-------------------|----------------------------
     summarize           | diagnosis / clinic_visit_summary | any          | family_a_sqlite
     summarize           | treatment_plan / null       | any               | treatment_sessions_sqlite
-    compare_progress    | any                         | any               | compare_sqlite
+    compare_progress    | any (date_from set)         | any               | compare_sqlite
+    compare_progress    | any (date_from null)        | any               | treatment_sessions_sqlite
     check_domain        | any                         | in FIXED_DOMAINS  | domain_sqlite
     check_domain        | any                         | NOT in taxonomy   | pinecone
     find_specific       | diagnosis / clinic_visit_summary | any          | family_a_sqlite
@@ -90,13 +102,20 @@ def route(params: QueryParams) -> RouteDecision:
 
     # -- compare_progress ----------------------------------------------------
     if intent == 'compare_progress':
+        # No reference date → "progress over time": fetch all sessions chronologically
+        if params.date_from is None:
+            return RouteDecision(strategy='treatment_sessions_sqlite', params=params)
         return RouteDecision(strategy='compare_sqlite', params=params)
-
+    
     # -- check_domain --------------------------------------------------------
     if intent == 'check_domain':
-        if topic in FIXED_DOMAINS:
+        normalized_topic = _normalize_topic(topic)
+        if normalized_topic in FIXED_DOMAINS:
+            params.topic = normalized_topic
             return RouteDecision(strategy='domain_sqlite', params=params)
         return RouteDecision(strategy='pinecone', params=params)
+
+
 
     # -- find_specific -------------------------------------------------------
     if intent == 'find_specific':

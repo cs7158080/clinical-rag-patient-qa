@@ -192,18 +192,32 @@ def extract_entities(text: str) -> "list[dict]":
             continue
 
         label_str: str = _label_map.get(int(label_id), "O")
+        # Normalize label scheme: this model emits B_PERS / B_ORG (underscore,
+        # no I_ tags); canonical form used below is B-PER / I-PER.
+        label_str = label_str.replace("_", "-")
+        if label_str.startswith("B-PERS") or label_str.startswith("I-PERS"):
+            label_str = label_str[:2] + "PER"
 
         if label_str.startswith("B-"):
-            # Close previous entity
-            if current_entity is not None:
-                entities.append(current_entity)
             entity_type = label_str[2:]  # strip "B-"
-            current_entity = {
-                "text": text[char_start:char_end],
-                "label": entity_type,
-                "start": char_start,
-                "end": char_end,
-            }
+            # Flat B_-only scheme: merge consecutive same-type tokens
+            # separated only by whitespace into a single span.
+            if (
+                current_entity is not None
+                and current_entity["label"] == entity_type
+                and text[current_entity["end"]:char_start].strip() == ""
+            ):
+                current_entity["text"] = text[current_entity["start"]:char_end]
+                current_entity["end"] = char_end
+            else:
+                if current_entity is not None:
+                    entities.append(current_entity)
+                current_entity = {
+                    "text": text[char_start:char_end],
+                    "label": entity_type,
+                    "start": char_start,
+                    "end": char_end,
+                }
 
         elif label_str.startswith("I-"):
             entity_type = label_str[2:]

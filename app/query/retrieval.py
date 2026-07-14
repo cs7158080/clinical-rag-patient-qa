@@ -13,6 +13,7 @@ The caller (generation/qa.py RetrieveStep) must handle both return types:
 import logging
 
 from app.config import AppConfig
+from app.ingestion.adapter_a import PARENT_ONLY_DOMAINS
 from app.prompts.qa import (
     NO_RESULTS_MESSAGE,
     NO_SESSIONS_AFTER,
@@ -90,21 +91,35 @@ def retrieve(
 # Strategy implementations
 # ---------------------------------------------------------------------------
 
+def _domain_chunks(db_path: str, patient_id: str, session_date: str) -> list[str]:
+    """Domain findings for a document's date, as dated chunks.
+
+    The ממצאי_האבחון section row holds only the intro line — the real findings
+    live in domain_findings and must be merged into any full-document fetch.
+    """
+    findings = db.fetch_domain_findings_for_date(db_path, patient_id, session_date)
+    return [
+        _dated_chunk(f.domain_name, f.session_date, f.domain_text_deidentified)
+        for f in findings
+        if f.domain_text_deidentified
+    ]
+
+
 def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
     """Fetch from family_a_sections, applying date resolution per Step 6."""
     # date resolution: date_latest=true OR (date_from is None and date_latest=False)
     # → treat as date_latest=True → fetch all sections of the latest document
     if params.session_limit is not None or params.date_from is None:
         doc = db.fetch_latest_family_a_doc(db_path, params.patient_id, params.template_type)
-        texts = (
-            [
+        if doc:
+            texts = [
                 _dated_chunk(section, doc['session_date'], text)
                 for section, text in doc['sections'].items()
                 if text
             ]
-            if doc
-            else []
-        )
+            texts += _domain_chunks(db_path, params.patient_id, doc['session_date'])
+        else:
+            texts = []
     else:
         chunks = db.fetch_family_a_sections(
             db_path,
@@ -118,6 +133,8 @@ def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
             for c in chunks
             if c.text_deidentified
         ]
+        for doc_date in sorted({c.session_date for c in chunks}):
+            texts += _domain_chunks(db_path, params.patient_id, doc_date)
 
     if not texts:
         return NO_RESULTS_MESSAGE
@@ -164,12 +181,11 @@ def _fetch_domain(
     pinecone_index,
 ) -> RetrievalResult | str:
     """Fetch from domain_findings; handle parent domains; fall back to Pinecone if no rows found."""
-    # Try exact domain match first
-    findings = db.fetch_domain_finding(db_path, params.patient_id, params.topic)
-
-    # If no exact match, check if it's a parent domain (like "הבעת שפה")
-    if not findings:
+    if params.topic in PARENT_ONLY_DOMAINS:
+        # Parent category (e.g. הבעת שפה) — return all child domains' findings
         findings = db.fetch_domain_by_parent(db_path, params.patient_id, params.topic)
+    else:
+        findings = db.fetch_domain_finding(db_path, params.patient_id, params.topic)
 
     if findings:
         texts = [

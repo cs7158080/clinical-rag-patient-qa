@@ -1,6 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE_ENTITY.*", category=DeprecationWarning)
-
 try:
     import nest_asyncio
     nest_asyncio.apply()
@@ -8,7 +5,6 @@ except ImportError:
     pass
 
 import os
-import sys
 import logging
 from app.config import get_config
 from app.logging_setup import setup_logging

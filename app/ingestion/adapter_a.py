@@ -69,6 +69,10 @@ PARENT_DOMAINS: dict[str, str] = {
     "התארגנות להבעת מלל מורכב": "הבעת שפה",
 }
 
+# Parent-only categories: headers above their child domains — never stored
+# as findings rows of their own. Derived from PARENT_DOMAINS.
+PARENT_ONLY_DOMAINS: set[str] = set(PARENT_DOMAINS.values())
+
 # Signature-block sentinel — clinician licence number indicator
 _SIGNATURE_SENTINEL = "מ.ר."
 
@@ -242,19 +246,25 @@ def parse_family_a(
             blocked = False  # new section resets the blocked flag
             continue
 
-        # --- Domain header detection (inside ממצאי האבחון, both Family A types) ---
-        # Use startswith() to handle colons and whitespace variants
+        # --- Domain header detection (inside ממצאי_האבחון) ---
         if current_section_key == "ממצאי_האבחון":
             matched_domain = None
+
             for domain in DOMAIN_HEADERS:
-                if stripped.rstrip(':').startswith(domain.rstrip(':')):
+                pattern = rf"^{re.escape(domain)}\s*[:\-–]?\s*(.*)$"
+                match = re.match(pattern, stripped)
+
+                if match:
                     matched_domain = domain
+                    current_domain = domain
+                    domain_lines.setdefault(domain, [])
+
+                    inline_text = match.group(1).strip()
+                    if inline_text:
+                        domain_lines[domain].append(inline_text)
                     break
 
             if matched_domain is not None:
-                current_domain = matched_domain
-                if current_domain not in domain_lines:
-                    domain_lines[current_domain] = []
                 continue
 
         # --- Content collection ---
@@ -274,8 +284,11 @@ def parse_family_a(
         section_texts = section_lines.get(key, [])
         sections[key] = "\n".join(section_texts).strip()
 
-    # Assemble domain texts (both Family A types)
+    # Assemble domain texts (both Family A types).
+    # Parent-only categories are section headers, not domains — skipped entirely.
     for domain_name, lines in domain_lines.items():
+        if domain_name in PARENT_ONLY_DOMAINS:
+            continue
         domains[domain_name] = "\n".join(lines).strip()
 
     logger.info(

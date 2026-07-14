@@ -78,6 +78,7 @@ def judge_answer(
             messages=[{"role": "user", "content": prompt}],
         )
         raw_text = response.content[0].text.strip()
+        logger.info(f"Getting response:{raw_text}")
         scores = json.loads(raw_text)
         return scores
     except json.JSONDecodeError as exc:
