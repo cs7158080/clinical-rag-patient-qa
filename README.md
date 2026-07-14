@@ -26,12 +26,11 @@ All patient data is de-identified before leaving the local machine. Real names a
 > Screenshots below use fully synthetic patient data created for demonstration purposes — no real patient information appears in this repository.
 
 **Ask a question in Hebrew, get an answer grounded in the patient's documents:**
-
-![Q&A tab](docs/screenshots/demo-qa-tab.png)
+![Generate summary tab](docs/screenshots/demo-summary-tab.png)
 
 **Generate a clinic visit summary document from a date range:**
 
-![Generate summary tab](docs/screenshots/demo-summary-tab.png)
+![Q&A tab](docs/screenshots/demo-qa-tab.png)
 
 ## Setup (first run)
 
