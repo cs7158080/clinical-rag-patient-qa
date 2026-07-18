@@ -38,8 +38,8 @@ from app.deidentification.deid import (
 from app.deidentification.ner import load_ner_model
 from app.deidentification.reid_map import (
     add_entity,
-    patient_id_from_folder,
     save as save_reid_map,
+    token_to_hash,
 )
 from app.deidentification.validation import validate_deidentified
 from app.storage.db import (
@@ -206,9 +206,10 @@ class IngestionWorkflow(Workflow):
             )
             return BlockedEvent(reason="name_conflict", file_path=file_path)
 
-        # Ensure the patient entity exists in the re-id map
-        patient_id = patient_id_from_folder(patient_folder_name)
-        add_entity(self._reid_map, "PERSON", patient_folder_name)
+        # Ensure the patient entity exists in the re-id map; the patient_id
+        # IS the key of the patient's PERSON entry (identity by construction).
+        patient_token = add_entity(self._reid_map, "PERSON", patient_folder_name)
+        patient_id = token_to_hash(patient_token)
 
         deid_data = dict(ev.parsed_data)
         # Preserve parent_domains mapping (needed for domain storage in store_family_a_step)

@@ -4,10 +4,14 @@ import json
 import logging
 from app.config import AppConfig
 from app.storage import db, pinecone_client
-from app.deidentification.reid_map import load as load_reid_map
+from app.deidentification.reid_map import (
+    load as load_reid_map,
+    save as save_reid_map,
+    add_entity,
+    token_to_hash,
+)
 from app.generation.qa import run_query
 from app.generation.summary_generator import run_generate_summary
-from app.deidentification.reid_map import patient_id_from_folder
 from app.ingestion.pipeline import run_ingestion
 
 logger = logging.getLogger(__name__)
@@ -43,10 +47,17 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
         if not os.path.isdir(patients_root):
             logger.warning("patients_root does not exist: %s", patients_root)
             return
+        # Lookup-or-mint an ID for every patient folder; persist the map only
+        # when a new folder minted a new key (random IDs are not recomputable).
+        reid_map = load_reid_map(reid_map_path)
+        entries_before = len(reid_map)
         for entry in os.scandir(patients_root):
             if entry.is_dir():
-                patient_id = patient_id_from_folder(entry.name)
+                token = add_entity(reid_map, "PERSON", entry.name)
+                patient_id = token_to_hash(token)
                 db.upsert_patient_metadata(db_path, patient_id, "display_name", entry.name)
+        if len(reid_map) != entries_before:
+            save_reid_map(reid_map_path, reid_map)
 
     def get_patient_choices():
         sync_patients_from_filesystem()

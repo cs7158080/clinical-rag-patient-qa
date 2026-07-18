@@ -9,14 +9,20 @@ Modules under test:
     app.deidentification.reid_map     — re-id map operations
 """
 
+import os
+
 import pytest
 
 from app.deidentification.deid import deidentify_text, validate_name_variants
 from app.deidentification.validation import validate_deidentified
 from app.deidentification.reid_map import (
     add_entity,
+    load,
+    patient_id_from_folder,
     reverse_lookup,
     reidentify_text,
+    save,
+    token_to_hash,
 )
 
 
@@ -192,6 +198,54 @@ def test_reid_map_reverse_lookup_unknown():
 
     result = reverse_lookup(reid_map, fake_token)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# re-id map — random IDs (lookup-or-mint) + atomic save
+# ---------------------------------------------------------------------------
+
+def test_add_entity_same_value_same_id():
+    """The same value must reuse the same map key (lookup-or-mint)."""
+    reid_map: dict = {}
+    token1 = add_entity(reid_map, "PERSON", "יוסי כהן")
+    token2 = add_entity(reid_map, "PERSON", "יוסי כהן")
+    assert token1 == token2
+    assert len(reid_map) == 1
+
+
+def test_add_entity_different_values_different_ids():
+    reid_map: dict = {}
+    token1 = add_entity(reid_map, "PERSON", "יוסי כהן")
+    token2 = add_entity(reid_map, "PERSON", "דוד לוי")
+    assert token1 != token2
+    assert len(reid_map) == 2
+
+
+def test_add_entity_key_not_derivable_from_value():
+    """The map key must NOT be sha256(value) — the dictionary attack is dead."""
+    import hashlib
+    reid_map: dict = {}
+    value = "יוסי כהן"
+    add_entity(reid_map, "PERSON", value)
+    assert hashlib.sha256(value.encode()).hexdigest() not in reid_map
+
+
+def test_patient_id_from_folder_lookup():
+    """Pure lookup: None before the folder is in the map, the token's key after."""
+    reid_map: dict = {}
+    assert patient_id_from_folder(reid_map, "כהן יוסי") is None
+    token = add_entity(reid_map, "PERSON", "כהן יוסי")
+    assert patient_id_from_folder(reid_map, "כהן יוסי") == token_to_hash(token)
+
+
+def test_save_atomic_no_tmp_left(tmp_path):
+    """save must round-trip through load and leave no .tmp file behind."""
+    reid_map: dict = {}
+    add_entity(reid_map, "PERSON", "יוסי כהן")
+    path = str(tmp_path / "reid_map.json")
+    save(path, reid_map)
+    assert load(path) == reid_map
+    assert not os.path.exists(path + ".tmp")
 
 
 # ---------------------------------------------------------------------------

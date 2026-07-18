@@ -1,15 +1,15 @@
 """
 reid_map.py — Re-identification map operations.
 
-The re-id map is a plain dict: { sha256_hex: original_value }.
-All SHA256 hashes are computed as hashlib.sha256(value.encode()).hexdigest().
+The re-id map is a plain dict: { 64_hex_key: original_value }.
+Keys are random (secrets.token_hex(32)) — NOT derivable from values.
 """
 
-import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +35,18 @@ def load(path: str) -> dict:
 def save(path: str, reid_map: dict) -> None:
     """Persist the re-id map to a JSON file with pretty indentation.
 
+    Atomic: writes to <path>.tmp then os.replace, so a crash mid-write can
+    never leave a corrupt map (random keys are not recomputable — corruption
+    would force a full reset). os.replace is atomic on Windows too.
     Creates parent directories if they do not exist.
     """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(reid_map, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +58,19 @@ def add_entity(reid_map: dict, entity_type: str, value: str) -> str:
 
     entity_type: 'PERSON' | 'ID' | 'INST' | 'PHONE' | 'EMAIL'
 
-    The same value always produces the same token (deterministic).
-    If the entity already exists in the map, the entry is not duplicated.
+    Lookup-or-mint: if *value* already has a key in the map, that key is
+    reused (idempotency comes from the map, not from a hash function);
+    otherwise a fresh random 64-hex key is minted via secrets.token_hex(32).
+    Keys are NOT derivable from values — a dictionary attack on the keys is
+    impossible, and losing the map means keys cannot be recomputed.
     Returns the token string, e.g. 'PERSON_a3f7b2...'.
     """
-    hash_hex = hashlib.sha256(value.encode()).hexdigest()
-    token = f"{entity_type}_{hash_hex}"
+    for hash_hex, existing_value in reid_map.items():
+        if existing_value == value:
+            return f"{entity_type}_{hash_hex}"
+    hash_hex = secrets.token_hex(32)
     reid_map[hash_hex] = value
-    return token
+    return f"{entity_type}_{hash_hex}"
 
 
 def token_to_hash(token: str) -> "str | None":
@@ -120,10 +130,15 @@ def reidentify_text(reid_map: dict, text: str) -> str:
 # Patient ID helpers
 # ---------------------------------------------------------------------------
 
-def patient_id_from_folder(folder_name: str) -> str:
-    """Return the anonymous patient_id derived from the patient folder name.
+def patient_id_from_folder(reid_map: dict, folder_name: str) -> "str | None":
+    """Return the anonymous patient_id for a patient folder name.
 
-    patient_id = sha256(folder_name) — identical to the hash embedded in the
-    PERSON token for the patient, so the re-id map can resolve both.
+    The patient_id is the reid_map key holding the folder name — identical to
+    the hash embedded in the patient's PERSON token, so the map resolves both.
+    Returns None when the folder is not in the map yet (callers that need to
+    create it should use add_entity + token_to_hash instead).
     """
-    return hashlib.sha256(folder_name.encode()).hexdigest()
+    for hash_hex, value in reid_map.items():
+        if value == folder_name:
+            return hash_hex
+    return None
