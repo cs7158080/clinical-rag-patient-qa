@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 # Compiled regex patterns for structural PII
 # ---------------------------------------------------------------------------
 
-NATIONAL_ID_REGEX = r"\b\d{9}\b"
-PHONE_REGEX = r"\b0[1-9][0-9]{7,8}\b|\b\+972[1-9][0-9]{7,8}\b"
-EMAIL_REGEX = r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
+from .patterns import EMAIL_REGEX, NATIONAL_ID_REGEX, PHONE_REGEX  # noqa: F401 (re-export)
 
 
 # ---------------------------------------------------------------------------

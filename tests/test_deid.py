@@ -109,6 +109,31 @@ def test_phone_replaced():
     assert "PHONE_" in result
 
 
+@pytest.mark.parametrize("phone", [
+    "052-1234567",       # hyphenated mobile
+    "052 123 4567",      # space-segmented
+    "+972-52-1234567",   # international, hyphenated
+    "+972521234567",     # international, contiguous
+    "03-1234567",        # landline, hyphenated
+])
+def test_phone_written_forms_replaced(phone):
+    """All standard written phone forms must be replaced with a PHONE_ token (Pass 1)."""
+    result = _deid(f"טלפון: {phone} של ההורה.")
+    assert phone not in result
+    assert "PHONE_" in result
+
+
+@pytest.mark.parametrize("nid", [
+    "12345678-9",  # hyphenated check digit
+    "12345678",    # bare 8-digit ID
+])
+def test_national_id_written_forms_replaced(nid):
+    """Hyphenated and 8-digit national IDs must be replaced with an ID_ token (Pass 1)."""
+    result = _deid(f"ת.ז. {nid} של המטופל.")
+    assert nid not in result
+    assert "ID_" in result
+
+
 # ---------------------------------------------------------------------------
 # Pass 1 — email address
 # ---------------------------------------------------------------------------
@@ -136,6 +161,26 @@ def test_pass2_regex_check():
 
     result = validate_deidentified(bad_text, reid_map)
 
+    assert result.passed is False
+    assert result.failure_type == "regex"
+
+
+@pytest.mark.parametrize("phone", [
+    "052-1234567",
+    "052 123 4567",
+    "+972-52-1234567",
+])
+def test_pass2_detects_phone_written_forms(phone):
+    """Pass 2 must flag written phone forms that slipped through Pass 1."""
+    result = validate_deidentified(f"טלפון: {phone}.", {})
+    assert result.passed is False
+    assert result.failure_type == "regex"
+
+
+@pytest.mark.parametrize("nid", ["12345678-9", "12345678"])
+def test_pass2_detects_national_id_written_forms(nid):
+    """Pass 2 must flag hyphenated / 8-digit national IDs that slipped through Pass 1."""
+    result = validate_deidentified(f"ת.ז. {nid}.", {})
     assert result.passed is False
     assert result.failure_type == "regex"
 
