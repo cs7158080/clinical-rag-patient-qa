@@ -33,6 +33,15 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+# Treat this as a virtual (non-package) project: uv installs only the
+# dependencies, not the project itself. The app is run via `python -m app.*`
+# from the project root, so no editable install is needed. This avoids an
+# editable `.pth` file holding the project's absolute path, which crashes
+# Python startup when that path contains non-ASCII (e.g. Hebrew) characters
+# read under a non-UTF-8 code page.
+package = false
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
