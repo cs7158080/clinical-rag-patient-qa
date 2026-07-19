@@ -35,8 +35,14 @@ SECTION_KEYS = [
     "תמצית_אבחון",
 ]
 
-# Mapping from header text → section key
-_HEADER_TO_KEY: dict[str, str] = dict(zip(SECTION_HEADERS, SECTION_KEYS))
+# Treatment-worded headings used by generated סיכום טיפול files — same section keys
+TREATMENT_SECTION_HEADERS: dict[str, str] = {
+    "מהלך הטיפול": "מהלך_האבחון",
+    "ממצאי הטיפול": "ממצאי_האבחון",
+}
+
+# Mapping from header text → section key (recognises both heading sets)
+HEADER_TO_KEY: dict[str, str] = dict(zip(SECTION_HEADERS, SECTION_KEYS)) | TREATMENT_SECTION_HEADERS
 
 # 13 domain sub-headers inside ממצאי האבחון (diagnosis only)
 DOMAIN_HEADERS = [
@@ -63,6 +69,10 @@ PARENT_DOMAINS: dict[str, str] = {
     "התארגנות להבעת מלל מורכב": "הבעת שפה",
 }
 
+# Parent-only categories: headers above their child domains — never stored
+# as findings rows of their own. Derived from PARENT_DOMAINS.
+PARENT_ONLY_DOMAINS: set[str] = set(PARENT_DOMAINS.values())
+
 # Signature-block sentinel — clinician licence number indicator
 _SIGNATURE_SENTINEL = "מ.ר."
 
@@ -81,13 +91,13 @@ def detect_template_type(filename: str) -> Optional[str]:
 
     Returns
     -------
-    'diagnosis' if the filename starts with 'אבחון',
-    'clinic_visit_summary' if it starts with 'סיכום ביקור',
+    'diagnosis' if the filename starts with 'סיכום אבחון',
+    'clinic_visit_summary' if it starts with 'סיכום טיפול',
     None otherwise.
     """
     if filename.startswith("סיכום אבחון"):
         return "diagnosis"
-    if filename.startswith("סיכום ביקור"):
+    if filename.startswith("סיכום טיפול"):
         return "clinic_visit_summary"
     return None
 
@@ -214,8 +224,9 @@ def parse_family_a(
             continue
 
         # --- Signature block sentinel ---
-        # If the clinician licence marker appears, stop collecting for current section.
-        if _SIGNATURE_SENTINEL in stripped:
+        # If the clinician licence marker or the closing salutation appears,
+        # stop collecting for the current section.
+        if _SIGNATURE_SENTINEL in stripped or stripped.startswith("בברכה"):
             blocked = True
             current_section_key = None
             current_domain = None
@@ -224,7 +235,7 @@ def parse_family_a(
         # --- Section header detection ---
         # Use startswith() to handle colons and whitespace variants
         section_key = None
-        for section_header_text, key in _HEADER_TO_KEY.items():
+        for section_header_text, key in HEADER_TO_KEY.items():
             if stripped.rstrip(':').startswith(section_header_text.rstrip(':')):
                 section_key = key
                 break
@@ -235,19 +246,25 @@ def parse_family_a(
             blocked = False  # new section resets the blocked flag
             continue
 
-        # --- Domain header detection (inside ממצאי האבחון, diagnosis only) ---
-        # Use startswith() to handle colons and whitespace variants
-        if template_type == "diagnosis" and current_section_key == "ממצאי_האבחון":
+        # --- Domain header detection (inside ממצאי_האבחון) ---
+        if current_section_key == "ממצאי_האבחון":
             matched_domain = None
+
             for domain in DOMAIN_HEADERS:
-                if stripped.rstrip(':').startswith(domain.rstrip(':')):
+                pattern = rf"^{re.escape(domain)}\s*[:\-–]?\s*(.*)$"
+                match = re.match(pattern, stripped)
+
+                if match:
                     matched_domain = domain
+                    current_domain = domain
+                    domain_lines.setdefault(domain, [])
+
+                    inline_text = match.group(1).strip()
+                    if inline_text:
+                        domain_lines[domain].append(inline_text)
                     break
 
             if matched_domain is not None:
-                current_domain = matched_domain
-                if current_domain not in domain_lines:
-                    domain_lines[current_domain] = []
                 continue
 
         # --- Content collection ---
@@ -255,7 +272,7 @@ def parse_family_a(
             continue
 
         if current_section_key is not None:
-            if current_domain is not None and template_type == "diagnosis":
+            if current_domain is not None:
                 # Collect into the current domain
                 domain_lines[current_domain].append(stripped)
             else:
@@ -267,10 +284,12 @@ def parse_family_a(
         section_texts = section_lines.get(key, [])
         sections[key] = "\n".join(section_texts).strip()
 
-    # Assemble domain texts (diagnosis only)
-    if template_type == "diagnosis":
-        for domain_name, lines in domain_lines.items():
-            domains[domain_name] = "\n".join(lines).strip()
+    # Assemble domain texts (both Family A types).
+    # Parent-only categories are section headers, not domains — skipped entirely.
+    for domain_name, lines in domain_lines.items():
+        if domain_name in PARENT_ONLY_DOMAINS:
+            continue
+        domains[domain_name] = "\n".join(lines).strip()
 
     logger.info(
         "parse_family_a: parsed %s (%s) — sections=%d domains=%d",

@@ -1,22 +1,29 @@
-# prompt: generation_v2
+# prompt: generation_v3
 """
-generation.py — Prompt templates for generating clinic visit summaries.
+generation.py — Prompt templates for generating treatment visit summaries.
 
 Temperature: 0.2 (set at call site in generation/summary_generator.py).
-The generated document follows the Family A fixed-section structure.
-LLM receives a base document as JSON and returns an updated JSON — no regex parsing needed.
+The LLM receives the base document as JSON (4 sections + a domain-findings object)
+and returns an updated JSON with the same keys. A parse failure raises
+GenerationParseError — it must never silently produce an empty document.
 """
 
 import json
 import re
 
-SECTION_KEYS = ['רקע', 'מהלך_האבחון', 'ממצאי_האבחון', 'סיכום_והמלצות', 'תמצית_אבחון']
+SECTION_KEYS = ['רקע', 'מהלך_האבחון', 'ממצאי_האבחון', 'סיכום_והמלצות']
+DOMAINS_KEY = 'ממצאי_תחומים'
+
+
+class GenerationParseError(ValueError):
+    """Raised when the LLM output cannot be parsed into the expected JSON document."""
+
 
 # ---------------------------------------------------------------------------
 # System instruction block
 # ---------------------------------------------------------------------------
 
-GENERATE_SUMMARY_SYSTEM = """You are an assistant for a speech-language clinician. Update a clinic visit summary in Hebrew only.
+GENERATE_SUMMARY_SYSTEM = """You are an assistant for a speech-language clinician. Update a treatment visit summary in Hebrew only.
 Answer solely based on the information provided. Do not add information that does not appear in the sources.
 Tokens such as PERSON_xxx and INST_xxx are names — use them naturally.
 Write dates in Hebrew.
@@ -30,8 +37,10 @@ Expand each described activity: state what was done, how the patient responded, 
 
 GENERATE_SUMMARY_PROMPT = GENERATE_SUMMARY_SYSTEM + """
 
-Base document to update (JSON — update only what the new information changes, leave unchanged sections as-is):
+Base document to update (JSON — update only what the new information changes, leave unchanged values exactly as-is):
 {base_document_json}
+
+The key ממצאי_תחומים maps each clinical domain to its current findings text.
 
 Treatment sessions ({date_from} to {date_to}):
 {sessions_text}
@@ -40,41 +49,48 @@ Treatment goals for the period:
 {goals_text}
 
 Return JSON only — without additional text — with exactly the following keys:
-רקע, מהלך_האבחון, ממצאי_האבחון, סיכום_והמלצות, תמצית_אבחון
-
-Do not add new keys and do not remove existing keys.
-If there is no new information relevant to a section — leave it as it is in the base document."""
+רקע, מהלך_האבחון, ממצאי_האבחון, סיכום_והמלצות, ממצאי_תחומים
+- The first four keys are strings. ממצאי_האבחון holds only the section's intro line.
+- ממצאי_תחומים is an object with exactly the same domain keys as in the base document — do not add or remove domains; update a domain's text only when the treatment sessions justify it.
+- Do not add new keys and do not remove existing keys.
+- If there is no new information relevant to a value — return it exactly as it is in the base document."""
 
 # ---------------------------------------------------------------------------
-# Section parsing — JSON-based, regex fallback
+# Section parsing — JSON-based; failure raises, never silently falls back
 # ---------------------------------------------------------------------------
 
-def parse_generated_sections(llm_output: str) -> dict[str, str]:
-    """Parse LLM JSON output into a section dict.
-
-    Attempts json.loads() on the raw output (or the first JSON object found).
-    Falls back to empty strings for all sections on any parse failure.
+def parse_generated_sections(llm_output: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Parse LLM JSON output into (sections, domains).
 
     Returns
     -------
-    dict mapping section key → text (stripped). Always contains all SECTION_KEYS.
-    """
-    empty = {k: '' for k in SECTION_KEYS}
+    sections : dict mapping each SECTION_KEYS entry → text (stripped).
+    domains  : dict mapping domain name → text (stripped).
 
+    Raises
+    ------
+    GenerationParseError
+        If the output is not valid JSON or ממצאי_תחומים is not an object.
+    """
     text = llm_output.strip()
 
-    # Try direct parse first, then extract first {...} block
     for candidate in [text, _extract_json_block(text)]:
         if candidate is None:
             continue
         try:
             data = json.loads(candidate)
-            if isinstance(data, dict):
-                return {k: str(data.get(k, '')).strip() for k in SECTION_KEYS}
         except (json.JSONDecodeError, ValueError):
             continue
+        if not isinstance(data, dict):
+            continue
+        domains_raw = data.get(DOMAINS_KEY) or {}
+        if not isinstance(domains_raw, dict):
+            raise GenerationParseError(f"'{DOMAINS_KEY}' is not a JSON object")
+        sections = {k: str(data.get(k, '')).strip() for k in SECTION_KEYS}
+        domains = {str(k).strip(): str(v).strip() for k, v in domains_raw.items()}
+        return sections, domains
 
-    return empty
+    raise GenerationParseError("LLM output is not a valid JSON object")
 
 
 def _extract_json_block(text: str) -> str | None:

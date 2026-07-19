@@ -30,15 +30,19 @@ from llama_index.core.workflow import (  # type: ignore
     step,
 )
 
-from ..deidentification.deid import deidentify_text, validate_name_variants
-from ..deidentification.ner import load_ner_model
-from ..deidentification.reid_map import (
-    add_entity,
-    patient_id_from_folder,
-    save as save_reid_map,
+from app.deidentification.deid import (
+    deidentify_text,
+    sweep_reid_values,
+    validate_name_variants,
 )
-from ..deidentification.validation import validate_deidentified
-from ..storage.db import (
+from app.deidentification.ner import load_ner_model
+from app.deidentification.reid_map import (
+    add_entity,
+    save as save_reid_map,
+    token_to_hash,
+)
+from app.deidentification.validation import validate_deidentified
+from app.storage.db import (
     delete_rows_for_file,
     get_file_hash,
     get_pinecone_ids_for_file,
@@ -49,15 +53,15 @@ from ..storage.db import (
     mark_file_ingested,
     upsert_patient_metadata,
 )
-from ..storage.models import (
+from app.storage.models import (
     DomainFinding,
     FamilyAChunk,
     TreatmentGoalsChunk,
     TreatmentSessionChunk,
 )
-from ..storage.pinecone_client import delete_vectors, get_cohere_embedding, upsert_vectors
-from .adapter_a import detect_template_type, parse_family_a
-from .adapter_b import parse_treatment_plan
+from app.storage.pinecone_client import delete_vectors, get_cohere_embedding, upsert_vectors
+from app.ingestion.adapter_a import detect_template_type, parse_family_a
+from app.ingestion.adapter_b import parse_treatment_plan
 
 logger = logging.getLogger(__name__)
 
@@ -145,27 +149,12 @@ class IngestionWorkflow(Workflow):
             logger.info("parse_step: skipping unchanged file: %s", file_path)
             return StopEvent(result="skipped")
 
-        # File has changed (or is new) — delete stale data first
-        if existing_hash is not None:
-            try:
-                prior_ids = get_pinecone_ids_for_file(self._db_path, file_path)
-                if prior_ids:
-                    delete_vectors(self._pinecone_index, prior_ids)
-            except Exception as exc:
-                logger.error(
-                    "parse_step: Pinecone deletion failed for %s: %s — aborting re-ingest",
-                    file_path,
-                    exc,
-                )
-                return StopEvent(result="error:pinecone_delete_failed")
-            delete_rows_for_file(self._db_path, file_path)
-
         # Detect template type from filename
         filename = os.path.basename(file_path)
         patient_folder_name = os.path.basename(os.path.dirname(file_path))
 
         try:
-            if filename.startswith("סיכום אבחון") or filename.startswith("סיכום ביקור"):
+            if filename.startswith("סיכום אבחון") or filename.startswith("סיכום טיפול"):
                 template_type = detect_template_type(filename)
                 if template_type is None:
                     logger.warning("parse_step: unknown Family A template for: %s", file_path)
@@ -217,9 +206,10 @@ class IngestionWorkflow(Workflow):
             )
             return BlockedEvent(reason="name_conflict", file_path=file_path)
 
-        # Ensure the patient entity exists in the re-id map
-        patient_id = patient_id_from_folder(patient_folder_name)
-        add_entity(self._reid_map, "PERSON", patient_folder_name)
+        # Ensure the patient entity exists in the re-id map; the patient_id
+        # IS the key of the patient's PERSON entry (identity by construction).
+        patient_token = add_entity(self._reid_map, "PERSON", patient_folder_name)
+        patient_id = token_to_hash(patient_token)
 
         deid_data = dict(ev.parsed_data)
         # Preserve parent_domains mapping (needed for domain storage in store_family_a_step)
@@ -235,13 +225,12 @@ class IngestionWorkflow(Workflow):
                 )
             deid_data["sections"] = deid_sections
 
-            if ev.template_type == "diagnosis":
-                deid_domains: dict[str, str] = {}
-                for domain, text in deid_data.get("domains", {}).items():
-                    deid_domains[domain] = deidentify_text(
-                        text, patient_folder_name, variants, self._reid_map, file_path
-                    )
-                deid_data["domains"] = deid_domains
+            deid_domains: dict[str, str] = {}
+            for domain, text in deid_data.get("domains", {}).items():
+                deid_domains[domain] = deidentify_text(
+                    text, patient_folder_name, variants, self._reid_map, file_path
+                )
+            deid_data["domains"] = deid_domains
 
         elif ev.template_type == "treatment_plan":
             deid_goals = []
@@ -272,9 +261,32 @@ class IngestionWorkflow(Workflow):
                 })
             deid_data["session_blocks"] = deid_sessions
 
+        # Final deterministic sweep — the reid map now contains everything
+        # discovered in ALL fields of this file (and previous files), so a
+        # name NER missed in one block but caught in another is still replaced.
+        if ev.template_type in ("diagnosis", "clinic_visit_summary"):
+            deid_data["sections"] = {
+                k: sweep_reid_values(v, self._reid_map)
+                for k, v in deid_data["sections"].items()
+            }
+            deid_data["domains"] = {
+                k: sweep_reid_values(v, self._reid_map)
+                for k, v in deid_data["domains"].items()
+            }
+        else:
+            deid_data["goals_rows"] = [
+                {**r, "goals_text": sweep_reid_values(r["goals_text"], self._reid_map)}
+                for r in deid_data["goals_rows"]
+            ]
+            deid_data["session_blocks"] = [
+                {**b, "session_text": sweep_reid_values(b["session_text"], self._reid_map)}
+                for b in deid_data["session_blocks"]
+            ]
+
         # Pass 2 validation — collect all de-identified text fields
         all_texts = (
             list(deid_data.get("sections", {}).values())
+            + list(deid_data.get("domains", {}).values())
             + [r["goals_text"] for r in deid_data.get("goals_rows", [])]
             + [b["session_text"] for b in deid_data.get("session_blocks", [])]
         )
@@ -323,6 +335,34 @@ class IngestionWorkflow(Workflow):
         return TreatmentEmbedEvent(parsed_data=ev.parsed_data)
 
     # ------------------------------------------------------------------
+    # Stale-data cleanup for re-ingested files
+    # ------------------------------------------------------------------
+
+    def _delete_stale_data(self, file_path: str) -> bool:
+        """Delete previously stored rows/vectors for a re-ingested file.
+
+        Called at the start of the store steps — after parsing, de-id,
+        validation, and embedding have all succeeded — so a blocked or
+        failed re-ingest keeps the previous good data. Returns False if
+        Pinecone deletion failed (caller must abort).
+        """
+        if get_file_hash(self._db_path, file_path) is None:
+            return True
+        try:
+            prior_ids = get_pinecone_ids_for_file(self._db_path, file_path)
+            if prior_ids:
+                delete_vectors(self._pinecone_index, prior_ids)
+        except Exception as exc:
+            logger.error(
+                "delete_stale_data: Pinecone deletion failed for %s: %s — aborting",
+                file_path,
+                exc,
+            )
+            return False
+        delete_rows_for_file(self._db_path, file_path)
+        return True
+
+    # ------------------------------------------------------------------
     # Step 5a: Store Family A (SQLite only — no embeddings)
     # ------------------------------------------------------------------
 
@@ -338,6 +378,9 @@ class IngestionWorkflow(Workflow):
         session_date: str = data["header"].get("date") or ""
         file_path: str = data["file_path"]
         header: dict = data["header"]
+
+        if not self._delete_stale_data(file_path):
+            return StopEvent(result="error:pinecone_delete_failed")
 
         # Upsert static patient metadata
         if header.get("date_of_birth"):
@@ -368,19 +411,18 @@ class IngestionWorkflow(Workflow):
             )
             insert_family_a_chunk(self._db_path, chunk)
 
-        # Insert domain findings (diagnosis only)
-        if template_type == "diagnosis":
-            parent_domains: dict = data.get("parent_domains", {})
+        # Insert domain findings (both Family A types)
+        parent_domains: dict = data.get("parent_domains", {})
 
-            for domain_name, domain_text in data.get("domains", {}).items():
-                finding = DomainFinding(
-                    patient_id=patient_id,
-                    session_date=session_date,
-                    domain_name=domain_name,
-                    domain_text_deidentified=domain_text,
-                    parent_domain=parent_domains.get(domain_name),
-                )
-                insert_domain_finding(self._db_path, finding)
+        for domain_name, domain_text in data.get("domains", {}).items():
+            finding = DomainFinding(
+                patient_id=patient_id,
+                session_date=session_date,
+                domain_name=domain_name,
+                domain_text_deidentified=domain_text,
+                parent_domain=parent_domains.get(domain_name),
+            )
+            insert_domain_finding(self._db_path, finding)
 
         mark_file_ingested(self._db_path, file_path, data["file_hash"])
         save_reid_map(
@@ -456,6 +498,9 @@ class IngestionWorkflow(Workflow):
         data = ev.parsed_data
         patient_id: str = data["patient_id"]
         file_path: str = data["file_path"]
+
+        if not self._delete_stale_data(file_path):
+            return StopEvent(result="error:pinecone_delete_failed")
 
         # Build Pinecone vector list
         pinecone_vectors: list[dict] = []
@@ -600,3 +645,31 @@ async def run_ingestion(
                 results.append((file_path, "error:unhandled"))
 
     return results
+
+
+if __name__ == "__main__":
+    import asyncio
+    from app.config import get_config
+    from app.storage.pinecone_client import init_pinecone
+    from app.deidentification.reid_map import load as load_reid_map
+
+    async def run():
+        config = get_config()
+        db_path = os.path.join(config.data_dir, "clinical_rag.db")
+        reid_map_path = os.path.join(config.data_dir, "reid_map.json")
+        reid_map = load_reid_map(reid_map_path)
+        pinecone_index = init_pinecone(config.pinecone_api_key, config.pinecone.index_name)
+
+        result = await run_ingestion(
+            patients_root=config.patients_root,
+            config=config,
+            reid_map=reid_map,
+            db_path=db_path,
+            pinecone_index=pinecone_index,
+        )
+        return result
+
+    asyncio.run(run())
+
+
+        

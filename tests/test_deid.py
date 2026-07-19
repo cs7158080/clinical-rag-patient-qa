@@ -9,14 +9,20 @@ Modules under test:
     app.deidentification.reid_map     — re-id map operations
 """
 
+import os
+
 import pytest
 
 from app.deidentification.deid import deidentify_text, validate_name_variants
 from app.deidentification.validation import validate_deidentified
 from app.deidentification.reid_map import (
     add_entity,
+    load,
+    patient_id_from_folder,
     reverse_lookup,
     reidentify_text,
+    save,
+    token_to_hash,
 )
 
 
@@ -103,6 +109,31 @@ def test_phone_replaced():
     assert "PHONE_" in result
 
 
+@pytest.mark.parametrize("phone", [
+    "052-1234567",       # hyphenated mobile
+    "052 123 4567",      # space-segmented
+    "+972-52-1234567",   # international, hyphenated
+    "+972521234567",     # international, contiguous
+    "03-1234567",        # landline, hyphenated
+])
+def test_phone_written_forms_replaced(phone):
+    """All standard written phone forms must be replaced with a PHONE_ token (Pass 1)."""
+    result = _deid(f"טלפון: {phone} של ההורה.")
+    assert phone not in result
+    assert "PHONE_" in result
+
+
+@pytest.mark.parametrize("nid", [
+    "12345678-9",  # hyphenated check digit
+    "12345678",    # bare 8-digit ID
+])
+def test_national_id_written_forms_replaced(nid):
+    """Hyphenated and 8-digit national IDs must be replaced with an ID_ token (Pass 1)."""
+    result = _deid(f"ת.ז. {nid} של המטופל.")
+    assert nid not in result
+    assert "ID_" in result
+
+
 # ---------------------------------------------------------------------------
 # Pass 1 — email address
 # ---------------------------------------------------------------------------
@@ -130,6 +161,26 @@ def test_pass2_regex_check():
 
     result = validate_deidentified(bad_text, reid_map)
 
+    assert result.passed is False
+    assert result.failure_type == "regex"
+
+
+@pytest.mark.parametrize("phone", [
+    "052-1234567",
+    "052 123 4567",
+    "+972-52-1234567",
+])
+def test_pass2_detects_phone_written_forms(phone):
+    """Pass 2 must flag written phone forms that slipped through Pass 1."""
+    result = validate_deidentified(f"טלפון: {phone}.", {})
+    assert result.passed is False
+    assert result.failure_type == "regex"
+
+
+@pytest.mark.parametrize("nid", ["12345678-9", "12345678"])
+def test_pass2_detects_national_id_written_forms(nid):
+    """Pass 2 must flag hyphenated / 8-digit national IDs that slipped through Pass 1."""
+    result = validate_deidentified(f"ת.ז. {nid}.", {})
     assert result.passed is False
     assert result.failure_type == "regex"
 
@@ -192,6 +243,54 @@ def test_reid_map_reverse_lookup_unknown():
 
     result = reverse_lookup(reid_map, fake_token)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# re-id map — random IDs (lookup-or-mint) + atomic save
+# ---------------------------------------------------------------------------
+
+def test_add_entity_same_value_same_id():
+    """The same value must reuse the same map key (lookup-or-mint)."""
+    reid_map: dict = {}
+    token1 = add_entity(reid_map, "PERSON", "יוסי כהן")
+    token2 = add_entity(reid_map, "PERSON", "יוסי כהן")
+    assert token1 == token2
+    assert len(reid_map) == 1
+
+
+def test_add_entity_different_values_different_ids():
+    reid_map: dict = {}
+    token1 = add_entity(reid_map, "PERSON", "יוסי כהן")
+    token2 = add_entity(reid_map, "PERSON", "דוד לוי")
+    assert token1 != token2
+    assert len(reid_map) == 2
+
+
+def test_add_entity_key_not_derivable_from_value():
+    """The map key must NOT be sha256(value) — the dictionary attack is dead."""
+    import hashlib
+    reid_map: dict = {}
+    value = "יוסי כהן"
+    add_entity(reid_map, "PERSON", value)
+    assert hashlib.sha256(value.encode()).hexdigest() not in reid_map
+
+
+def test_patient_id_from_folder_lookup():
+    """Pure lookup: None before the folder is in the map, the token's key after."""
+    reid_map: dict = {}
+    assert patient_id_from_folder(reid_map, "כהן יוסי") is None
+    token = add_entity(reid_map, "PERSON", "כהן יוסי")
+    assert patient_id_from_folder(reid_map, "כהן יוסי") == token_to_hash(token)
+
+
+def test_save_atomic_no_tmp_left(tmp_path):
+    """save must round-trip through load and leave no .tmp file behind."""
+    reid_map: dict = {}
+    add_entity(reid_map, "PERSON", "יוסי כהן")
+    path = str(tmp_path / "reid_map.json")
+    save(path, reid_map)
+    assert load(path) == reid_map
+    assert not os.path.exists(path + ".tmp")
 
 
 # ---------------------------------------------------------------------------

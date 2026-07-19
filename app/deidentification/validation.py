@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from .patterns import EMAIL_REGEX, NATIONAL_ID_REGEX, PHONE_REGEX
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -35,9 +37,9 @@ class ValidationResult:
 # ---------------------------------------------------------------------------
 
 _REGEX_PATTERNS: "dict[str, str]" = {
-    "national_id": r"\b\d{9}\b",
-    "email":       r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-    "phone":       r"\b0[1-9][0-9]{7,8}\b|\b\+972[1-9][0-9]{7,8}\b",
+    "national_id": NATIONAL_ID_REGEX,
+    "email":       EMAIL_REGEX,
+    "phone":       PHONE_REGEX,
 }
 
 # Pattern that a valid de-identified token must match
@@ -106,13 +108,31 @@ def _check_ner_rescan(text: str) -> bool:
 
     for entity in entities:
         entity_text = entity.get("text", "")
-        if not _TOKEN_PATTERN.match(entity_text):
-            label = entity.get("label", "?")
-            logger.warning(
-                "validation: NER re-scan found unreplaced %s entity (token form not matched).",
-                label,
-            )
-            return False
+
+        # Already de-identified in Pass 1 — a token here is expected and fine.
+        if _TOKEN_PATTERN.match(entity_text):
+            continue
+
+        # Apply the SAME guards Pass 1 uses before it treats a span as a real
+        # entity (deid.deidentify_text): skip subword-fragment noise (too short
+        # or no Hebrew letter) and prefix-attached spans. Without this the
+        # validator is stricter than the sanitizer and blocks on spans Pass 1
+        # legitimately declined to replace.
+        start = entity.get("start", 0)
+        end = entity.get("end", 0)
+        if len(entity_text.strip()) < 2 or not re.search(r"[֐-׿]", entity_text):
+            continue
+        if (start > 0 and text[start - 1].isalpha()) or (
+            end < len(text) and text[end].isalpha()
+        ):
+            continue
+
+        label = entity.get("label", "?")
+        logger.warning(
+            "validation: NER re-scan found unreplaced %s entity (token form not matched).",
+            label,
+        )
+        return False
 
     return True
 
@@ -120,6 +140,9 @@ def _check_ner_rescan(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # Main gate
 # ---------------------------------------------------------------------------
+
+_TOKEN_SCRUB = re.compile(r"(?:PERSON|INST|ID|PHONE|EMAIL)_[0-9a-f]{64}")
+
 
 def validate_deidentified(text: str, reid_map: dict) -> ValidationResult:
     """Run all three de-identification validation checks in order.
@@ -131,6 +154,11 @@ def validate_deidentified(text: str, reid_map: dict) -> ValidationResult:
     pass. When the NER model is not loaded, ner_rescan fails in production
     (fail-closed) and is skipped with a warning in test mode.
     """
+    # Mask tokens first — they are trusted placeholders, and their 64-char
+    # hex content otherwise trips the checks (NER tags hex fragments as PER,
+    # and digit-only map values can substring-match inside the hex).
+    text = _TOKEN_SCRUB.sub(" ", text)
+
     if not _check_regex_patterns(text):
         return ValidationResult(passed=False, failure_type="regex")
 

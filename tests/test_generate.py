@@ -18,7 +18,7 @@ from app.storage.db import (
     upsert_patient_metadata,
 )
 from app.storage.models import TreatmentSessionChunk
-from app.deidentification.reid_map import add_entity
+from app.deidentification.reid_map import add_entity, token_to_hash
 
 
 # ---------------------------------------------------------------------------
@@ -41,10 +41,9 @@ def _make_test_patient(db_path: str, reid_map: dict) -> tuple[str, str]:
     Returns (patient_id, session_date).
     """
     patient_folder = "כהן יוסי"  # fictitious
-    patient_id = add_entity(reid_map, "PERSON", patient_folder)
-    # patient_id in DB = sha256(patient_folder); use the token hash portion
-    import hashlib
-    pid = hashlib.sha256(patient_folder.encode()).hexdigest()
+    token = add_entity(reid_map, "PERSON", patient_folder)
+    # patient_id in DB = the reid_map key of the patient's PERSON token
+    pid = token_to_hash(token)
 
     session_date = "2025-02-11"
 

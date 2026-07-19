@@ -6,7 +6,7 @@ models_dir: "./models"
 # run_mode: "production" | "test"
 # production — ingestion is BLOCKED if the NER model cannot be loaded (fail-closed).
 # test       — ingestion proceeds without NER, with a prominent warning.
-run_mode: "test"
+run_mode: "production"
 
 pinecone:
   index_name: "rag-index"
@@ -20,6 +20,7 @@ anthropic:
   generation_model: "claude-haiku-4-5-20251001"
   temperature_extraction: 0
   temperature_generation: 0.2
+  max_tokens_generation: 10000
 
 logging:
   level: "INFO"

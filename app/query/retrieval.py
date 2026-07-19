@@ -13,6 +13,7 @@ The caller (generation/qa.py RetrieveStep) must handle both return types:
 import logging
 
 from app.config import AppConfig
+from app.ingestion.adapter_a import PARENT_ONLY_DOMAINS
 from app.prompts.qa import (
     NO_RESULTS_MESSAGE,
     NO_SESSIONS_AFTER,
@@ -23,6 +24,11 @@ from app.storage import db, pinecone_client
 from app.storage.models import QueryParams, RetrievalResult
 
 logger = logging.getLogger(__name__)
+
+
+def _dated_chunk(label: str, session_date: str, text: str) -> str:
+    """Prefix chunk text with a Hebrew date header so dates reach the LLM."""
+    return f"[{label} מתאריך {session_date}]\n{text}"
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +91,35 @@ def retrieve(
 # Strategy implementations
 # ---------------------------------------------------------------------------
 
+def _domain_chunks(db_path: str, patient_id: str, session_date: str) -> list[str]:
+    """Domain findings for a document's date, as dated chunks.
+
+    The ממצאי_האבחון section row holds only the intro line — the real findings
+    live in domain_findings and must be merged into any full-document fetch.
+    """
+    findings = db.fetch_domain_findings_for_date(db_path, patient_id, session_date)
+    return [
+        _dated_chunk(f.domain_name, f.session_date, f.domain_text_deidentified)
+        for f in findings
+        if f.domain_text_deidentified
+    ]
+
+
 def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
     """Fetch from family_a_sections, applying date resolution per Step 6."""
     # date resolution: date_latest=true OR (date_from is None and date_latest=False)
-    # → treat as date_latest=True → fetch latest single row
+    # → treat as date_latest=True → fetch all sections of the latest document
     if params.session_limit is not None or params.date_from is None:
-        chunk = db.fetch_latest_family_a(db_path, params.patient_id, params.template_type)
-        chunks = [chunk] if chunk else []
+        doc = db.fetch_latest_family_a_doc(db_path, params.patient_id, params.template_type)
+        if doc:
+            texts = [
+                _dated_chunk(section, doc['session_date'], text)
+                for section, text in doc['sections'].items()
+                if text
+            ]
+            texts += _domain_chunks(db_path, params.patient_id, doc['session_date'])
+        else:
+            texts = []
     else:
         chunks = db.fetch_family_a_sections(
             db_path,
@@ -100,8 +128,14 @@ def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
             params.date_from,
             params.date_to,
         )
+        texts = [
+            _dated_chunk(c.section, c.session_date, c.text_deidentified)
+            for c in chunks
+            if c.text_deidentified
+        ]
+        for doc_date in sorted({c.session_date for c in chunks}):
+            texts += _domain_chunks(db_path, params.patient_id, doc_date)
 
-    texts = [c.text_deidentified for c in chunks if c.text_deidentified]
     if not texts:
         return NO_RESULTS_MESSAGE
 
@@ -124,7 +158,11 @@ def _fetch_treatment_sessions(db_path: str, params: QueryParams) -> RetrievalRes
         sessions = db.fetch_treatment_sessions(
             db_path, params.patient_id, params.date_from, params.date_to
         )
-    texts = [s.session_text_deidentified for s in sessions if s.session_text_deidentified]
+    texts = [
+        _dated_chunk('טיפול', s.session_date, s.session_text_deidentified)
+        for s in sessions
+        if s.session_text_deidentified
+    ]
     if not texts:
         return NO_RESULTS_MESSAGE
 
@@ -143,15 +181,18 @@ def _fetch_domain(
     pinecone_index,
 ) -> RetrievalResult | str:
     """Fetch from domain_findings; handle parent domains; fall back to Pinecone if no rows found."""
-    # Try exact domain match first
-    findings = db.fetch_domain_finding(db_path, params.patient_id, params.topic)
-
-    # If no exact match, check if it's a parent domain (like "הבעת שפה")
-    if not findings:
+    if params.topic in PARENT_ONLY_DOMAINS:
+        # Parent category (e.g. הבעת שפה) — return all child domains' findings
         findings = db.fetch_domain_by_parent(db_path, params.patient_id, params.topic)
+    else:
+        findings = db.fetch_domain_finding(db_path, params.patient_id, params.topic)
 
     if findings:
-        texts = [f.domain_text_deidentified for f in findings if f.domain_text_deidentified]
+        texts = [
+            _dated_chunk(f.domain_name, f.session_date, f.domain_text_deidentified)
+            for f in findings
+            if f.domain_text_deidentified
+        ]
         if texts:
             logger.info(
                 "domain_sqlite: retrieved %d finding(s) for patient=%s domain=%s (exact + parent)",
@@ -192,8 +233,16 @@ def _fetch_compare(db_path: str, params: QueryParams) -> RetrievalResult | str:
     if not after:
         return NO_SESSIONS_AFTER
 
-    before_texts = [s.session_text_deidentified for s in before if s.session_text_deidentified]
-    after_texts = [s.session_text_deidentified for s in after if s.session_text_deidentified]
+    before_texts = [
+        _dated_chunk('טיפול', s.session_date, s.session_text_deidentified)
+        for s in before
+        if s.session_text_deidentified
+    ]
+    after_texts = [
+        _dated_chunk('טיפול', s.session_date, s.session_text_deidentified)
+        for s in after
+        if s.session_text_deidentified
+    ]
 
     logger.info(
         "compare_sqlite: %d before / %d after sessions for patient=%s date_ref=%s",
@@ -297,11 +346,11 @@ def _pinecone_retrieve(
         if chunk_type == 'session_summary':
             rows = db.fetch_treatment_sessions(db_path, pid, sdate, sdate)
             if rows:
-                texts.append(rows[0].session_text_deidentified)
+                texts.append(_dated_chunk('טיפול', sdate, rows[0].session_text_deidentified))
         elif chunk_type == 'goals_row':
             goal = db.fetch_latest_treatment_goals(db_path, pid, sdate)
             if goal:
-                texts.append(goal.goals_text_deidentified)
+                texts.append(_dated_chunk('יעדי טיפול', sdate, goal.goals_text_deidentified))
 
     if not texts:
         return NO_RESULTS_MESSAGE
@@ -320,7 +369,11 @@ def _sqlite_fallback(db_path: str, params: QueryParams) -> RetrievalResult | str
     sessions = db.fetch_treatment_sessions(
         db_path, params.patient_id, params.date_from, params.date_to
     )
-    texts = [s.session_text_deidentified for s in sessions if s.session_text_deidentified]
+    texts = [
+        _dated_chunk('טיפול', s.session_date, s.session_text_deidentified)
+        for s in sessions
+        if s.session_text_deidentified
+    ]
     if not texts:
         return NO_RESULTS_MESSAGE
 

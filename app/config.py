@@ -36,6 +36,7 @@ class AnthropicConfig:
     generation_model: str
     temperature_extraction: float
     temperature_generation: float
+    max_tokens_generation: int
 
 
 @dataclass
@@ -150,6 +151,9 @@ def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppC
         ),
         temperature_generation=float(
             _require_key(anthropic_raw, "temperature_generation", "anthropic.temperature_generation")
+        ),
+        max_tokens_generation=int(
+            _require_key(anthropic_raw, "max_tokens_generation", "anthropic.max_tokens_generation")
         ),
     )
 

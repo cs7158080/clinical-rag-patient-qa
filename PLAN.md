@@ -111,8 +111,9 @@ Reads Family B files → emits N chunks from Layer 1 (goals rows) + M chunks fro
 **`family_a_sections`** — diagnosis & clinic_visit_summary (same structure, same adapter)
 Note: records in this table are written via two paths — (1) the ingestion adapter reading a file
 from disk, and (2) the generate feature writing directly after creating a clinic_visit_summary.
-Both paths produce the same schema; `source_file_path` is NULL for generated summaries,
-distinguishing the two origins.
+Both paths produce the same schema; generated summaries store the path of the .docx they created
+in `source_file_path`. Generated summaries write only 4 section rows — תמצית_אבחון is not
+generated (Session 2).
 ```
 patient_id        TEXT   -- anonymous hash
 template_type     TEXT   -- 'diagnosis' | 'clinic_visit_summary'
@@ -145,15 +146,17 @@ source_file_path            TEXT
 PRIMARY KEY (patient_id, session_date)
 ```
 
-**`domain_findings`** — 13 fixed domains, extracted from diagnosis ממצאי האבחון
+**`domain_findings`** — 13 fixed domains, extracted from the ממצאי האבחון section of both
+Family A types — diagnosis and clinic_visit_summary, including generated summaries (Session 2)
 ```
 patient_id               TEXT
-session_date             TEXT   -- ISO 8601 (matches parent diagnosis row)
+session_date             TEXT   -- ISO 8601 (matches parent Family A row)
 domain_name              TEXT   -- fixed set: פרגמטיקה ותקשורת | הבנת שפה | הבעת שפה |
                                 --   לקסיקון | תחביר | מורפולוגיה | התארגנות להבעת מלל מורכב |
                                 --   מובנות הדיבור | מודעות פונולוגית | זיכרון שמיעתי |
                                 --   אורל מוטור | אכילה | שטף
 domain_text_deidentified TEXT
+parent_domain            TEXT   -- parent category for sub-domains (e.g. לקסיקון → הבעת שפה), else NULL
 PRIMARY KEY (patient_id, session_date, domain_name)
 ```
 
@@ -197,6 +200,16 @@ chunk_type    -- 'goals_row' | 'session_summary'
 | Layer 2 sessions | Multi-format date parser (see *Session boundary detection* below) | 1 row per session block |
 
 No fixed character-limit splitting. Structure of the document drives all boundaries.
+
+### Section headers — Amendment (Session 2, 2026-07-10)
+
+Family A parsing recognises two heading wordings mapped to the same SQLite section keys:
+the diagnosis wording (רקע, מהלך האבחון, ממצאי האבחון, סיכום והמלצות, תמצית אבחון) and the
+treatment wording written by generated summaries (מהלך הטיפול → מהלך_האבחון,
+ממצאי הטיפול → ממצאי_האבחון). Section keys in SQLite are unchanged.
+Signature detection: collection for the current section stops at a paragraph containing the
+licence marker מ.ר. or starting with בברכה — signature blocks written as separate hard
+paragraphs no longer leak into סיכום_והמלצות.
 
 ### Session boundary detection
 
@@ -574,39 +587,68 @@ before displaying the answer to the user.
 **Zero-results message (Hebrew):**
 *"לא מצאתי מידע רלוונטי לשאלה זו. כדאי לנסח אחרת."*
 
-### Generate clinic_visit_summary
+### Generate clinic_visit_summary  (redesigned — Session 2, 2026-07-10)
 
-**Trigger:** A dedicated button (outside the Q&A flow). Inputs: patient name + session date.
+**Trigger:** A dedicated button (outside the Q&A flow). Inputs: patient + date range
+(date_from / date_to).
 
-**Retrieval (all from SQLite):**
-- Single session: `treatment_sessions` WHERE patient_id = ? AND session_date = ?
-- Latest goals row: `treatment_goals` WHERE patient_id = ? AND session_date ≤ ? ORDER BY session_date DESC LIMIT 1
-- Previous clinic_visit_summary: `family_a_sections` WHERE patient_id = ? AND template_type = 'clinic_visit_summary' ORDER BY session_date DESC LIMIT 1
+**Retrieval (all from SQLite, de-identified):**
+- All sessions in range: `treatment_sessions` WHERE patient_id = ? AND session_date BETWEEN ? AND ?
+- All goals rows in range: `treatment_goals`, same filter
+- Base document: latest `clinic_visit_summary`, else latest `diagnosis`
+  (`db.fetch_latest_family_a_doc` — returns sections + session_date + source_file_path).
+  If neither exists → Hebrew error, the LLM is not called.
+- Domain findings of the base document's date: `db.fetch_domain_findings_for_date`.
 
 **Generation:**
-Claude Haiku 4.5 receives the three sources above and fills the Family A template structure
-(same sections as diagnosis). Sections with no relevant content from the session are left blank.
+Claude Haiku 4.5 (`anthropic.generation_model`; `anthropic.max_tokens_generation` from
+config.yaml) receives the base document as JSON — 4 section keys (רקע, מהלך_האבחון,
+ממצאי_האבחון, סיכום_והמלצות; ממצאי_האבחון holds only the section's intro line) plus a
+ממצאי_תחומים object (domain → findings text) — together with the sessions and goals texts.
+It returns the same JSON, changing only what the treatment sessions justify; unchanged values
+stay verbatim. תמצית_אבחון is not generated.
+A parse failure raises `GenerationParseError` → Hebrew error message to the user, raw LLM
+output written to the log. An empty document is never produced silently.
+
+**Document construction (formatting skeleton — `app/generation/docx_builder.py`):**
+The .docx is built by copying a physical skeleton file and replacing only section bodies:
+1. Skeleton = the base document's physical file (`source_file_path`); fallback = the bundled
+   clean template `tamplates/טמפליט אבחון בנים.docx`, whose header placeholders
+   (שם / ת.ל. / ת.ז.) are then filled from patient_metadata / re-id map.
+2. Headings are re-worded in place: מהלך האבחון → מהלך הטיפול, ממצאי האבחון → ממצאי הטיפול,
+   and אבחון → טיפול in the הנדון line. רקע and סיכום והמלצות are unchanged. The תמצית
+   section is deleted entirely.
+3. Injected paragraphs clone the pPr/rPr of the content they replace — fonts, size, RTL
+   direction, indentation and layout are inherited from the skeleton, never rebuilt.
+4. ממצאי הטיפול body = intro line + one bold sub-heading per domain ("<domain> – ") followed
+   by the domain text, in the fixed domain order.
+5. The header date line is set to `תאריך: <date_to>` (ISO).
 
 **Re-identification before saving:**
-- Document body: PERSON_xxx tokens replaced via re-id map.
+- Document body and domain texts: PERSON_xxx tokens replaced via re-id map.
 - Header fields (not generated by LLM):
   - שם: PERSON_xxx token → re-id map
   - ת.ז.: pulled directly from `patient_metadata` WHERE field_name='national_id'
   - ת.ל.: pulled from `patient_metadata` WHERE field_name='date_of_birth' (dates are not tokenized per Step 3)
 
 **File saved to patient folder:**
-`clients/<patient_name>/סיכום ביקור <number> <name>.docx`
+`clients/<patient_name>/סיכום טיפול <number> <name>.docx` — renamed from סיכום ביקור
+(Session 2). The adapter detects the `סיכום טיפול` filename prefix as clinic_visit_summary;
+`סיכום ביקור` is no longer recognised (no such files exist).
 Patient folder name is resolved from `patient_id` via re-id map: `reid_map.reverse_lookup(patient_id)` (since `patient_id = sha256(folder_name)`, the map contains this entry).
-Sequential number = scan patient folder for existing `סיכום ביקור` files + increment.
-File contains real PII (re-identified). 
+Sequential number = scan patient folder for existing `סיכום טיפול` files + increment.
+File contains real PII (re-identified). No PDF is produced (removed in Session 2;
+reportlab / python-bidi dependencies dropped).
 
 **SQLite record:**
-The tokenized sections exactly as returned by the LLM — before re-identification — are
-written to `family_a_sections` (template_type = 'clinic_visit_summary'). The re-identified
-text exists only in the saved `.docx`. The generation workflow carries both versions to the
-save step for this purpose (Session 1 fix, 2026-07-09).
-Row inserted into `ingested_files` after serialization with the known hash → re-ingest skips this file.
-If the clinician edits the generated file, its hash changes and the file will be re-ingested on the next run through the full pipeline (including de-identification). This is the intended behavior and must not be treated as a special case.
+The tokenized sections (4 rows, no תמצית) and tokenized domain-findings rows (with
+parent_domain) — exactly as returned by the LLM, before re-identification — are written to
+`family_a_sections` / `domain_findings`. The re-identified text exists only in the saved
+`.docx`. The generation workflow carries both versions to the save step for this purpose
+(Session 1 fix, 2026-07-09).
+Row inserted into `ingested_files`; the hash is computed from the exact bytes written to disk
+(single serialization).
+If the clinician edits the generated file, its hash changes and the file will be re-ingested on the next run through the full pipeline (including de-identification). This is the intended behavior and must not be treated as a special case. Round-trip is guaranteed: the adapter recognises the treatment headings and extracts domain findings for clinic_visit_summary files as well (Session 2).
 
 ### Error Handling — Amendment (Step 9)
 
@@ -616,6 +658,7 @@ If the clinician edits the generated file, its hash changes and the file will be
 | A `PERSON_xxx` / `ID_xxx` token appears in the LLM answer but is absent from the re-id map | The token is left visible in the displayed answer. A `WARNING` entry is written to the log containing the token ID only (not the original value). |
 | Generate feature: no session found for the selected date | User-facing message returned before the LLM is called: *"לא נמצאה פגישה בתאריך זה"*. |
 | Generate feature: writing the `.docx` file to the patient folder fails | An error message is returned to the user. The `family_a_sections` SQLite row is **not written** — file serialization and SQLite insertion are coupled; if one fails, neither is committed. |
+| Generate feature: LLM output cannot be parsed as the expected JSON | Hebrew error message to the user; the raw LLM output is written to the log. No file is created and no SQLite rows are written. |
 
 ---
 

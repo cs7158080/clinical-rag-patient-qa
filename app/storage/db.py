@@ -751,12 +751,15 @@ def get_max_session_date(db_path: str, patient_id: str) -> Optional[str]:
     return row[0] if row and row[0] is not None else None
 
 
-def fetch_latest_family_a_as_dict(
+def fetch_latest_family_a_doc(
     db_path: str, patient_id: str, template_type: str
-) -> dict[str, str] | None:
-    """Return all sections of the most recent document of template_type as {section: text}.
+) -> dict | None:
+    """Return the most recent document of template_type with its sections and origin.
 
-    Returns None if no rows exist for this patient + template_type.
+    Returns
+    -------
+    {'session_date': str, 'source_file_path': str | None, 'sections': {section: text}}
+    or None if no rows exist for this patient + template_type.
     """
     with sqlite3.connect(db_path) as conn:
         max_date_row = conn.execute(
@@ -774,7 +777,38 @@ def fetch_latest_family_a_as_dict(
     rows = fetch_family_a_sections(db_path, patient_id, template_type, max_date, max_date)
     if not rows:
         return None
-    return {row.section: row.text_deidentified for row in rows}
+    return {
+        "session_date": max_date,
+        "source_file_path": rows[0].source_file_path,
+        "sections": {row.section: row.text_deidentified for row in rows},
+    }
+
+
+def fetch_domain_findings_for_date(
+    db_path: str, patient_id: str, session_date: str
+) -> list[DomainFinding]:
+    """Return all domain_findings rows for patient + session_date (exact match)."""
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT patient_id, session_date, domain_name, domain_text_deidentified, parent_domain
+            FROM domain_findings
+            WHERE patient_id = ? AND session_date = ?
+            ORDER BY domain_name ASC
+            """,
+            (patient_id, session_date),
+        ).fetchall()
+
+    return [
+        DomainFinding(
+            patient_id=r[0],
+            session_date=r[1],
+            domain_name=r[2],
+            domain_text_deidentified=r[3],
+            parent_domain=r[4],
+        )
+        for r in rows
+    ]
 
 
 def fetch_treatment_goals_in_range(

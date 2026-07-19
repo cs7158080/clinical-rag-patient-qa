@@ -5,84 +5,33 @@ from typing import Union
 import os
 import io
 import json
-import html
 import hashlib
 import logging
-from docx import Document as DocxDocument
-from bidi.algorithm import get_display
 
 from app.storage import db
-from app.storage.models import FamilyAChunk
+from app.storage.models import FamilyAChunk, DomainFinding
 from app.deidentification.reid_map import reidentify_text, load as load_reid_map, reverse_lookup
-from app.prompts.generation import GENERATE_SUMMARY_PROMPT, parse_generated_sections, SECTION_KEYS
+from app.prompts.generation import (
+    GENERATE_SUMMARY_PROMPT,
+    GenerationParseError,
+    parse_generated_sections,
+    SECTION_KEYS,
+    DOMAINS_KEY,
+)
 from app.prompts.qa import NO_SESSION_MESSAGE, ERROR_MESSAGE
+from app.ingestion.adapter_a import PARENT_DOMAINS
+from app.generation.docx_builder import build_summary_docx
 from app.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-SECTION_LABELS = {
-    'רקע': 'רקע:',
-    'מהלך_האבחון': 'מהלך האבחון:',
-    'ממצאי_האבחון': 'ממצאי האבחון:',
-    'סיכום_והמלצות': 'סיכום והמלצות:',
-    'תמצית_אבחון': 'תמצית אבחון',
-}
-
-NO_BASE_DOCUMENT_MESSAGE = "לא נמצא מסמך בסיס (אבחון או סיכום ביקור קודם) — לא ניתן לייצר סיכום"
-
-
-def _rtl(text: str) -> str:
-    return html.escape(get_display(str(text))) if text else ''
-
-
-def _save_pdf(docx_path: str, patient_name: str, national_id: str, date_of_birth: str,
-              session_date: str, sections: dict) -> str:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.enums import TA_RIGHT
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    pdf_path = docx_path.replace('.docx', '.pdf')
-
-    font_name = 'Helvetica'
-    for candidate in [r'C:\Windows\Fonts\arial.ttf', r'C:\Windows\Fonts\ARIAL.TTF']:
-        if os.path.exists(candidate):
-            try:
-                pdfmetrics.registerFont(TTFont('ArialHeb', candidate))
-                font_name = 'ArialHeb'
-            except Exception:
-                pass
-            break
-
-    meta_style = ParagraphStyle('Meta', fontName=font_name, fontSize=11,
-                                alignment=TA_RIGHT, leading=16, spaceAfter=2)
-    heading_style = ParagraphStyle('SectionHeading', fontName=font_name, fontSize=13,
-                                   alignment=TA_RIGHT, leading=18, spaceBefore=10, spaceAfter=4)
-    body_style = ParagraphStyle('Body', fontName=font_name, fontSize=11,
-                                alignment=TA_RIGHT, leading=16, spaceAfter=2)
-
-    doc = SimpleDocTemplate(
-        pdf_path, pagesize=A4,
-        rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50,
-    )
-
-    story = []
-    story.append(Paragraph(_rtl(f'שם: {patient_name}'), meta_style))
-    story.append(Paragraph(_rtl(f'ת.ז.: {national_id}'), meta_style))
-    story.append(Paragraph(_rtl(f'ת.ל.: {date_of_birth}'), meta_style))
-    story.append(Paragraph(_rtl(f'תאריך: {session_date}'), meta_style))
-    story.append(Spacer(1, 14))
-
-    for key, label in SECTION_LABELS.items():
-        story.append(Paragraph(_rtl(label), heading_style))
-        for line in (sections.get(key) or '').split('\n'):
-            story.append(Paragraph(_rtl(line), body_style))
-        story.append(Spacer(1, 6))
-
-    doc.build(story)
-    return pdf_path
+NO_BASE_DOCUMENT_MESSAGE = "לא נמצא מסמך בסיס (אבחון או סיכום טיפול קודם) — לא ניתן לייצר סיכום"
+PARSE_FAILURE_MESSAGE = (
+    "יצירת הסיכום נכשלה — תשובת המודל לא התקבלה במבנה תקין ולא נוצר קובץ. "
+    "נסי שוב; הפלט הגולמי נשמר בלוג."
+)
+FALLBACK_TEMPLATE_PATH = os.path.join('tamplates', 'טמפליט אבחון בנים.docx')
+GENERATED_FILE_PREFIX = 'סיכום טיפול'
 
 
 # ---------------------------------------------------------------------------
@@ -96,9 +45,11 @@ class GenerateStartEvent(StartEvent):
 
 
 class SourcesEvent(Event):
-    sessions_text: str       # all sessions in range, joined by \n---\n
-    goals_text: str          # all goals rows in range, joined by \n---\n
-    base_document: dict      # {section_key: text} from latest clinic_visit_summary or diagnosis
+    sessions_text: str      # all sessions in range, joined by \n---\n
+    goals_text: str         # all goals rows in range, joined by \n---\n
+    base_sections: dict     # {section_key: text} of the base document (no תמצית)
+    base_domains: dict      # {domain_name: text} of the base document's findings
+    base_source_path: str   # physical file the base document came from ('' if unknown)
     patient_id: str
     date_from: str
     date_to: str
@@ -106,13 +57,18 @@ class SourcesEvent(Event):
 
 class TokenizedDocEvent(Event):
     sections: dict
+    domains: dict
+    base_source_path: str
     patient_id: str
     date_to: str   # used as session_date when writing to SQLite
 
 
 class ReidentifiedDocEvent(Event):
     sections: dict             # re-identified — for the .docx body only
+    domains: dict              # re-identified — for the .docx body only
     tokenized_sections: dict   # de-identified — the ONLY version stored in SQLite
+    tokenized_domains: dict    # de-identified — the ONLY version stored in SQLite
+    base_source_path: str
     patient_id: str
     date_to: str
     patient_name: str
@@ -134,7 +90,7 @@ class GenerateSummaryWorkflow(Workflow):
             model=config.anthropic.generation_model,
             api_key=config.anthropic_api_key,
             temperature=config.anthropic.temperature_generation,
-            max_tokens=10000
+            max_tokens=config.anthropic.max_tokens_generation,
         )
 
     @step
@@ -157,25 +113,36 @@ class GenerateSummaryWorkflow(Workflow):
         goals_text = '\n---\n'.join(g.goals_text_deidentified for g in goals_rows) if goals_rows else ''
 
         # Base document: latest clinic_visit_summary → latest diagnosis → error
-        base_document = db.fetch_latest_family_a_as_dict(
+        base_doc = db.fetch_latest_family_a_doc(
             self._db_path, ev.patient_id, 'clinic_visit_summary'
         )
-        if base_document is None:
+        if base_doc is None:
             logger.info(
                 "No clinic_visit_summary found for patient=%s, falling back to diagnosis",
                 ev.patient_id,
             )
-            base_document = db.fetch_latest_family_a_as_dict(
+            base_doc = db.fetch_latest_family_a_doc(
                 self._db_path, ev.patient_id, 'diagnosis'
             )
-        if base_document is None:
+        if base_doc is None:
             logger.error("No base document found for patient=%s", ev.patient_id)
             return StopEvent(result=NO_BASE_DOCUMENT_MESSAGE)
+
+        # The 4 generated sections (תמצית is dropped from the generated document)
+        base_sections = {k: base_doc['sections'].get(k, '') for k in SECTION_KEYS}
+
+        # Domain findings of the base document's date
+        findings = db.fetch_domain_findings_for_date(
+            self._db_path, ev.patient_id, base_doc['session_date']
+        )
+        base_domains = {f.domain_name: f.domain_text_deidentified for f in findings}
 
         return SourcesEvent(
             sessions_text=sessions_text,
             goals_text=goals_text,
-            base_document=base_document,
+            base_sections=base_sections,
+            base_domains=base_domains,
+            base_source_path=base_doc['source_file_path'] or '',
             patient_id=ev.patient_id,
             date_from=ev.date_from,
             date_to=ev.date_to,
@@ -185,8 +152,10 @@ class GenerateSummaryWorkflow(Workflow):
     async def generate_summary_step(
         self, ctx: Context, ev: SourcesEvent
     ) -> Union[TokenizedDocEvent, StopEvent]:
+        base_document = dict(ev.base_sections)
+        base_document[DOMAINS_KEY] = ev.base_domains
         prompt = GENERATE_SUMMARY_PROMPT.format(
-            base_document_json=json.dumps(ev.base_document, ensure_ascii=False, indent=2),
+            base_document_json=json.dumps(base_document, ensure_ascii=False, indent=2),
             date_from=ev.date_from,
             date_to=ev.date_to,
             sessions_text=ev.sessions_text,
@@ -198,18 +167,26 @@ class GenerateSummaryWorkflow(Workflow):
                 ev.patient_id, ev.date_from, ev.date_to,
             )
             response = await self._llm.acomplete(prompt)
-            raw = response.text.strip()
-            if not raw:
-                return StopEvent(result=ERROR_MESSAGE)
-            sections = parse_generated_sections(raw)
-            return TokenizedDocEvent(
-                sections=sections,
-                patient_id=ev.patient_id,
-                date_to=ev.date_to,
-            )
+            raw = (response.text or '').strip()
         except Exception as e:
             logger.error("Summary generation error: %s", e)
             return StopEvent(result=ERROR_MESSAGE)
+
+        try:
+            sections, domains = parse_generated_sections(raw)
+        except GenerationParseError as e:
+            logger.error(
+                "Summary generation parse failure (%s). Raw LLM output:\n%s", e, raw
+            )
+            return StopEvent(result=PARSE_FAILURE_MESSAGE)
+
+        return TokenizedDocEvent(
+            sections=sections,
+            domains=domains,
+            base_source_path=ev.base_source_path,
+            patient_id=ev.patient_id,
+            date_to=ev.date_to,
+        )
 
     @step
     async def build_doc_step(
@@ -221,6 +198,7 @@ class GenerateSummaryWorkflow(Workflow):
             return StopEvent(result="לא ניתן לייצר סיכום — מפת הזיהוי חסרה")
 
         reidentified_sections = {k: reidentify_text(reid_map, v) for k, v in ev.sections.items()}
+        reidentified_domains = {k: reidentify_text(reid_map, v) for k, v in ev.domains.items()}
 
         metadata = db.get_patient_metadata(self._db_path, ev.patient_id)
         patient_token = f"PERSON_{ev.patient_id}"
@@ -230,7 +208,10 @@ class GenerateSummaryWorkflow(Workflow):
 
         return ReidentifiedDocEvent(
             sections=reidentified_sections,
+            domains=reidentified_domains,
             tokenized_sections=ev.sections,
+            tokenized_domains=ev.domains,
+            base_source_path=ev.base_source_path,
             patient_id=ev.patient_id,
             date_to=ev.date_to,
             patient_name=patient_name,
@@ -242,35 +223,54 @@ class GenerateSummaryWorkflow(Workflow):
     async def save_doc_step(self, ctx: Context, ev: ReidentifiedDocEvent) -> StopEvent:
         reid_map = load_reid_map(self._reid_map_path)
         patient_folder_name = reverse_lookup(reid_map, f"PERSON_{ev.patient_id}") or ev.patient_id
-        patients_root = self._config.patients_root
-        patient_folder = os.path.join(patients_root, patient_folder_name)
+        patient_folder = os.path.join(self._config.patients_root, patient_folder_name)
 
-        existing = [f for f in os.listdir(patient_folder) if f.startswith('סיכום ביקור')]
+        existing = [f for f in os.listdir(patient_folder) if f.startswith(GENERATED_FILE_PREFIX)]
         next_num = len(existing) + 1
-        base_name = f"סיכום ביקור {next_num} {patient_folder_name}"
-        docx_path = os.path.join(patient_folder, base_name + '.docx')
+        docx_path = os.path.join(
+            patient_folder, f"{GENERATED_FILE_PREFIX} {next_num} {patient_folder_name}.docx"
+        )
 
-        doc = DocxDocument()
-        doc.add_paragraph(f"שם: {ev.patient_name}")
-        doc.add_paragraph(f"ת.ז.: {ev.national_id}")
-        doc.add_paragraph(f"ת.ל.: {ev.date_of_birth}")
-        doc.add_paragraph(f"תאריך: {ev.date_to}")
+        # Skeleton: the base document's physical file; fallback — the clean template
+        doc = None
+        if ev.base_source_path and os.path.isfile(ev.base_source_path):
+            try:
+                doc = build_summary_docx(
+                    ev.base_source_path, ev.sections, ev.domains, header_date=ev.date_to
+                )
+            except Exception as e:
+                logger.error(
+                    "Skeleton build from base document failed (%s), falling back to template: %s",
+                    ev.base_source_path, e,
+                )
+        if doc is None:
+            header_fields = {
+                'name': ev.patient_name,
+                'national_id': ev.national_id,
+                'date_of_birth': ev.date_of_birth,
+            }
+            try:
+                doc = build_summary_docx(
+                    FALLBACK_TEMPLATE_PATH, ev.sections, ev.domains,
+                    header_date=ev.date_to, header_fields=header_fields,
+                )
+            except Exception as e:
+                logger.error("Skeleton build from template failed: %s", e)
+                return StopEvent(result=f"שגיאה בבניית הקובץ: {e}")
 
-        for key, label in SECTION_LABELS.items():
-            doc.add_paragraph(label, style='Heading 2')
-            doc.add_paragraph(ev.sections.get(key, ''))
-
+        # Single serialization — the stored hash matches the exact bytes on disk
+        buf = io.BytesIO()
+        doc.save(buf)
+        file_bytes = buf.getvalue()
         try:
-            doc.save(docx_path)
+            with open(docx_path, 'wb') as fh:
+                fh.write(file_bytes)
         except Exception as e:
             logger.error("Failed to save summary doc: %s", e)
             return StopEvent(result=f"שגיאה בשמירת הקובץ: {e}")
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
 
-        buf = io.BytesIO()
-        doc.save(buf)
-        file_hash = hashlib.sha256(buf.getvalue()).hexdigest()
-
-        # Write de-identified (tokenized) sections to SQLite — never the
+        # Write de-identified (tokenized) sections + domains to SQLite — never the
         # re-identified text; session_date = date_to (last session in range)
         for section_key, text in ev.tokenized_sections.items():
             chunk = FamilyAChunk(
@@ -283,24 +283,19 @@ class GenerateSummaryWorkflow(Workflow):
             )
             db.insert_family_a_chunk(self._db_path, chunk)
 
+        for domain_name, text in ev.tokenized_domains.items():
+            db.insert_domain_finding(self._db_path, DomainFinding(
+                patient_id=ev.patient_id,
+                session_date=ev.date_to,
+                domain_name=domain_name,
+                domain_text_deidentified=text,
+                parent_domain=PARENT_DOMAINS.get(domain_name),
+            ))
+
         db.mark_file_ingested(self._db_path, docx_path, file_hash)
 
-        pdf_path = None
-        try:
-            pdf_path = _save_pdf(
-                docx_path,
-                patient_name=ev.patient_name,
-                national_id=ev.national_id,
-                date_of_birth=ev.date_of_birth,
-                session_date=ev.date_to,
-                sections=ev.sections,
-            )
-            logger.info("PDF saved: %s", pdf_path)
-        except Exception as e:
-            logger.error("PDF generation failed: %s", e)
-
         logger.info("Summary generated and saved: %s", docx_path)
-        return StopEvent(result=json.dumps({"docx": docx_path, "pdf": pdf_path}))
+        return StopEvent(result=json.dumps({"docx": docx_path}))
 
 
 async def run_generate_summary(

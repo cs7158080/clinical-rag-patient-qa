@@ -55,6 +55,7 @@ def extract_query_params(
         )
 
         raw = response.content[0].text.strip()
+        logger.info(f"Getting response:{raw}")
 
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1]

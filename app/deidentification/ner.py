@@ -86,9 +86,17 @@ def load_ner_model(models_dir: str) -> None:
     from transformers import AutoTokenizer  # noqa: PLC0415
     _tokenizer = AutoTokenizer.from_pretrained(onnx_path)
 
-    # Load ONNX inference session
+    # Load ONNX inference session.
+    # Pin to single-threaded, sequential execution so inference is deterministic:
+    # multi-threaded float reductions vary summation order between runs, which can
+    # flip argmax on borderline tokens and make NER output non-reproducible — an
+    # intermittent phantom entity (or, worse, an intermittent miss in Pass 1).
     import onnxruntime as ort  # noqa: PLC0415
-    _session = ort.InferenceSession(model_file)
+    _so = ort.SessionOptions()
+    _so.intra_op_num_threads = 1
+    _so.inter_op_num_threads = 1
+    _so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    _session = ort.InferenceSession(model_file, sess_options=_so)
 
     # Load label map from config.json
     config_file = os.path.join(onnx_path, "config.json")
@@ -117,8 +125,19 @@ def is_model_loaded() -> bool:
 # Inference
 # ---------------------------------------------------------------------------
 
+# Sliding-window scan parameters. 800 Hebrew chars stay well under the
+# model's 512-token limit (~1.5-2.5 subwords per word); the 150-char
+# overlap must exceed the longest expected entity so nothing is ever cut.
+_WINDOW_CHARS = 800
+_OVERLAP_CHARS = 150
+
+
 def extract_entities(text: str) -> "list[dict]":
     """Run Hebrew NER on *text* and return a list of entity dicts.
+
+    Text longer than _WINDOW_CHARS is scanned in overlapping windows so the
+    model's 512-token limit never silently drops the tail of a document.
+    Entity offsets are always relative to the full *text*.
 
     Each dict has the keys::
 
@@ -130,11 +149,57 @@ def extract_entities(text: str) -> "list[dict]":
         }
 
     Raises RuntimeError if the model has not been loaded.
+    """
+    if not is_model_loaded():
+        raise RuntimeError(
+            "NER model is not loaded. Call load_ner_model(models_dir) first."
+        )
+
+    if len(text) <= _WINDOW_CHARS:
+        return _extract_entities_window(text)
+
+    stride = _WINDOW_CHARS - _OVERLAP_CHARS
+    entities: "list[dict]" = []
+    seen_spans: "set[tuple[int, int, str]]" = set()
+
+    window_start = 0
+    while window_start < len(text):
+        window_text = text[window_start:window_start + _WINDOW_CHARS]
+        is_last_window = window_start + _WINDOW_CHARS >= len(text)
+
+        for ent in _extract_entities_window(window_text):
+            # Entities starting inside the overlap zone belong to the NEXT
+            # window, which sees them in full (overlap > any entity length).
+            if not is_last_window and ent["start"] >= stride:
+                continue
+            g_start = window_start + ent["start"]
+            g_end = window_start + ent["end"]
+            key = (g_start, g_end, ent["label"])
+            if key in seen_spans:
+                continue
+            seen_spans.add(key)
+            entities.append(
+                {"text": ent["text"], "label": ent["label"],
+                 "start": g_start, "end": g_end}
+            )
+
+        if is_last_window:
+            break
+        window_start += stride
+
+    entities.sort(key=lambda e: e["start"])
+    return entities
+
+
+def _extract_entities_window(text: str) -> "list[dict]":
+    """Run the ONNX model on a single window (must fit in 512 tokens).
 
     Implementation notes
     --------------------
     * Tokenisation uses return_offsets_mapping=True and return_tensors="np" so
       no torch tensors are created anywhere in this path.
+    * truncation=True/max_length=512 remain as a safety net only — callers
+      size windows to stay under the limit.
     * The ONNX session returns logits; argmax gives token-level label ids.
     * BIO tagging is resolved to word-level spans: B-X starts a new entity of
       type X; I-X extends the current entity; any other tag closes the current
@@ -143,11 +208,6 @@ def extract_entities(text: str) -> "list[dict]":
       and that are not the first token of a word) are merged into the same span.
     * [CLS] and [SEP] tokens (offset (0,0)) are skipped.
     """
-    if not is_model_loaded():
-        raise RuntimeError(
-            "NER model is not loaded. Call load_ner_model(models_dir) first."
-        )
-
     import numpy as np  # noqa: PLC0415 — available via onnxruntime dependency
 
     # Tokenise — use numpy tensors to avoid torch entirely
@@ -192,18 +252,32 @@ def extract_entities(text: str) -> "list[dict]":
             continue
 
         label_str: str = _label_map.get(int(label_id), "O")
+        # Normalize label scheme: this model emits B_PERS / B_ORG (underscore,
+        # no I_ tags); canonical form used below is B-PER / I-PER.
+        label_str = label_str.replace("_", "-")
+        if label_str.startswith("B-PERS") or label_str.startswith("I-PERS"):
+            label_str = label_str[:2] + "PER"
 
         if label_str.startswith("B-"):
-            # Close previous entity
-            if current_entity is not None:
-                entities.append(current_entity)
             entity_type = label_str[2:]  # strip "B-"
-            current_entity = {
-                "text": text[char_start:char_end],
-                "label": entity_type,
-                "start": char_start,
-                "end": char_end,
-            }
+            # Flat B_-only scheme: merge consecutive same-type tokens
+            # separated only by whitespace into a single span.
+            if (
+                current_entity is not None
+                and current_entity["label"] == entity_type
+                and text[current_entity["end"]:char_start].strip() == ""
+            ):
+                current_entity["text"] = text[current_entity["start"]:char_end]
+                current_entity["end"] = char_end
+            else:
+                if current_entity is not None:
+                    entities.append(current_entity)
+                current_entity = {
+                    "text": text[char_start:char_end],
+                    "label": entity_type,
+                    "start": char_start,
+                    "end": char_end,
+                }
 
         elif label_str.startswith("I-"):
             entity_type = label_str[2:]
