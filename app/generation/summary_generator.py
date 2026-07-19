@@ -34,6 +34,15 @@ FALLBACK_TEMPLATE_PATH = os.path.join('tamplates', 'טמפליט אבחון בנ
 GENERATED_FILE_PREFIX = 'סיכום טיפול'
 
 
+def _find_patient_folder(patients_roots: list, folder_name: str):
+    """Return the first existing <root>/<folder_name> path, scanning roots in config order."""
+    for root in patients_roots:
+        candidate = os.path.join(root, folder_name)
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
@@ -223,7 +232,10 @@ class GenerateSummaryWorkflow(Workflow):
     async def save_doc_step(self, ctx: Context, ev: ReidentifiedDocEvent) -> StopEvent:
         reid_map = load_reid_map(self._reid_map_path)
         patient_folder_name = reverse_lookup(reid_map, f"PERSON_{ev.patient_id}") or ev.patient_id
-        patient_folder = os.path.join(self._config.patients_root, patient_folder_name)
+        patient_folder = _find_patient_folder(self._config.patients_roots, patient_folder_name)
+        if patient_folder is None:
+            logger.error("Patient folder '%s' not found under any patients root", patient_folder_name)
+            return StopEvent(result="תיקיית המטופל לא נמצאה באף אחת מתיקיות המטופלים שבהגדרות")
 
         existing = [f for f in os.listdir(patient_folder) if f.startswith(GENERATED_FILE_PREFIX)]
         next_num = len(existing) + 1

@@ -43,19 +43,19 @@ THEME_COLORS = {
 def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: str):
 
     def sync_patients_from_filesystem():
-        patients_root = config.patients_root
-        if not os.path.isdir(patients_root):
-            logger.warning("patients_root does not exist: %s", patients_root)
-            return
         # Lookup-or-mint an ID for every patient folder; persist the map only
         # when a new folder minted a new key (random IDs are not recomputable).
         reid_map = load_reid_map(reid_map_path)
         entries_before = len(reid_map)
-        for entry in os.scandir(patients_root):
-            if entry.is_dir():
-                token = add_entity(reid_map, "PERSON", entry.name)
-                patient_id = token_to_hash(token)
-                db.upsert_patient_metadata(db_path, patient_id, "display_name", entry.name)
+        for patients_root in config.patients_roots:
+            if not os.path.isdir(patients_root):
+                logger.warning("patients root does not exist: %s", patients_root)
+                continue
+            for entry in os.scandir(patients_root):
+                if entry.is_dir():
+                    token = add_entity(reid_map, "PERSON", entry.name)
+                    patient_id = token_to_hash(token)
+                    db.upsert_patient_metadata(db_path, patient_id, "display_name", entry.name)
         if len(reid_map) != entries_before:
             save_reid_map(reid_map_path, reid_map)
 
@@ -113,11 +113,13 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
             return "אירעה שגיאה. נסי שוב."
 
     async def ingest_files():
-        if not os.path.isdir(config.patients_root):
-            return "תיקיית המטופלים לא נמצאה: " + config.patients_root
+        existing_roots = [r for r in config.patients_roots if os.path.isdir(r)]
+        missing_roots = [r for r in config.patients_roots if not os.path.isdir(r)]
+        if not existing_roots:
+            return "אף תיקיית מטופלים לא נמצאה: " + ", ".join(config.patients_roots)
         reid_map = load_reid_map(reid_map_path)
         try:
-            results = await run_ingestion(config.patients_root, config, reid_map, db_path, pinecone_index)
+            results = await run_ingestion(existing_roots, config, reid_map, db_path, pinecone_index)
         except Exception as e:
             logger.error(f"Ingestion error: {e}")
             return f"שגיאה בטעינה: {e}"
@@ -144,6 +146,8 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
                 lines.append(f"✗  {filename} ({result})")
 
         summary = f"סיום טעינה — {ok} חדשים, {skipped} ללא שינוי, {blocked} חסומים, {errors} שגיאות\n\n"
+        if missing_roots:
+            summary = "אזהרה: תיקיות שלא נמצאו ולא נטענו: " + ", ".join(missing_roots) + "\n\n" + summary
         return summary + "\n".join(lines)
 
     async def generate_summary(patient_id: str, date_from: str, date_to: str):

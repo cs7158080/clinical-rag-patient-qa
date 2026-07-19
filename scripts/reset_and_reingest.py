@@ -20,6 +20,18 @@ from app.deidentification.reid_map import load as load_reid_map
 from app.ingestion.pipeline import run_ingestion
 
 
+def _label_for(path: str, roots: list) -> str:
+    """Relpath of *path* against the root that contains it; the raw path as fallback."""
+    for root in roots:
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:
+            continue
+        if not rel.startswith(".."):
+            return rel
+    return path
+
+
 def reset(config, db_path: str, reid_map_path: str) -> None:
     print("=== RESET ===")
 
@@ -63,7 +75,7 @@ async def reingest(config, db_path: str, reid_map_path: str) -> None:
     reid_map = load_reid_map(reid_map_path)
 
     results = await run_ingestion(
-        patients_root=config.patients_root,
+        patients_roots=config.patients_roots,
         config=config,
         reid_map=reid_map,
         db_path=db_path,
@@ -73,7 +85,7 @@ async def reingest(config, db_path: str, reid_map_path: str) -> None:
     print("\n=== RESULTS ===")
     ok = skipped = blocked = error = 0
     for path, result in results:
-        label = os.path.relpath(path, config.patients_root)
+        label = _label_for(path, config.patients_roots)
         print(f"  {result:30s}  {label}")
         if result == "ok":
             ok += 1

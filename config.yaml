@@ -1,3 +1,7 @@
+# One folder, or a list of folders:
+# patients_root:
+#   - "C:/SpeechTherapy/clients"
+#   - "D:/Clinic2/clients"
 patients_root: "C:/SpeechTherapy/clients"
 data_dir: "./data"
 logs_dir: "./logs"

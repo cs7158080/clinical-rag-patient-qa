@@ -101,7 +101,7 @@ def test_generate_summary_smoke(tmp_path, config):
 
     # Patch config to point to our temp dirs
     config.data_dir = str(tmp_path)
-    config.patients_root = patients_root
+    config.patients_roots = [patients_root]
 
     try:
         from app.generation.summary_generator import run_generate_summary
