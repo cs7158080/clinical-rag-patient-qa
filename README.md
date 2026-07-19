@@ -42,7 +42,7 @@ All patient data is de-identified before leaving the local machine. Real names a
    PINECONE_API_KEY=...
    ```
 
-2. Edit `config.yaml` to set `patients_root` to the path of your patient files folder.
+2. Edit `config.yaml` to set `patients_root` to the path of your patient files folder — a single path, or a YAML list of paths to scan several folders. A patient folder with the same name in more than one root is treated as the same patient.
 
 3. Run setup (installs dependencies, initializes the database, converts the NER model to ONNX):
    ```

@@ -57,7 +57,7 @@ class EvaluationConfig:
 @dataclass
 class AppConfig:
     # Directory paths (string, may be relative or absolute)
-    patients_root: str
+    patients_roots: list  # always a list, even if config.yaml has a single string
     data_dir: str
     logs_dir: str
     models_dir: str
@@ -174,8 +174,24 @@ def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppC
             "Must be 'production' or 'test'."
         )
 
+    # patients_root: a single string or a list of strings (duplicates removed)
+    roots_raw = _require_key(raw, "patients_root", "patients_root")
+    if isinstance(roots_raw, str) and roots_raw.strip():
+        patients_roots = [roots_raw]
+    elif (
+        isinstance(roots_raw, list)
+        and roots_raw
+        and all(isinstance(r, str) and r.strip() for r in roots_raw)
+    ):
+        patients_roots = list(dict.fromkeys(roots_raw))
+    else:
+        raise ValueError(
+            "Config key 'patients_root' must be a non-empty string "
+            "or a non-empty list of strings."
+        )
+
     _config = AppConfig(
-        patients_root=_require_key(raw, "patients_root", "patients_root"),
+        patients_roots=patients_roots,
         data_dir=raw.get("data_dir", "./data"),
         logs_dir=raw.get("logs_dir", "./logs"),
         models_dir=raw.get("models_dir", "./models"),

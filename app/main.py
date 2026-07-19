@@ -39,7 +39,7 @@ def main():
 
     app = build_app(config, db_path, pinecone_index, reid_map_path)
     logger.info("Starting Gradio server at http://localhost:7860")
-    app.launch(server_name="127.0.0.1", server_port=7860, share=False, allowed_paths=[config.patients_root])
+    app.launch(server_name="127.0.0.1", server_port=7860, share=False, allowed_paths=config.patients_roots)
 
 
 if __name__ == "__main__":

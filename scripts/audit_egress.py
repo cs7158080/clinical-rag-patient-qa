@@ -409,7 +409,7 @@ async def run_flows_synthetic(auditor, config, db_path, reid_map_path, index):
     auditor.flow = "ingestion"
     reid_map = load_reid_map(reid_map_path)
     results = await run_ingestion(
-        patients_root=config.patients_root, config=config,
+        patients_roots=config.patients_roots, config=config,
         reid_map=reid_map, db_path=db_path, pinecone_index=index,
     )
     for path, result in results:
@@ -469,8 +469,10 @@ def build_real_forbidden_list(auditor, config, reid_map_path) -> None:
             auditor.add_name(value)
         else:
             auditor.add_plain(value)
-    if os.path.isdir(config.patients_root):
-        for entry in os.scandir(config.patients_root):
+    for patients_root in config.patients_roots:
+        if not os.path.isdir(patients_root):
+            continue
+        for entry in os.scandir(patients_root):
             if entry.is_dir():
                 auditor.add_name(entry.name)
 
@@ -527,7 +529,7 @@ def main() -> int:
             build_synthetic_corpus(patients_root)
             build_synthetic_forbidden_list(auditor)
 
-            run_config = replace(config, patients_root=patients_root, data_dir=data_dir)
+            run_config = replace(config, patients_roots=[patients_root], data_dir=data_dir)
             db_path = os.path.join(data_dir, "clinical_rag.db")
             reid_map_path = os.path.join(data_dir, "reid_map.json")
             from app.storage.db import init_db

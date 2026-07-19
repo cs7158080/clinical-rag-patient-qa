@@ -565,22 +565,23 @@ class IngestionWorkflow(Workflow):
 # ---------------------------------------------------------------------------
 
 async def run_ingestion(
-    patients_root: str,
+    patients_roots: list,
     config,
     reid_map: dict,
     db_path: str,
     pinecone_index,
 ) -> list:
-    """Walk the patients root directory and ingest every .docx file found.
+    """Walk every patients root directory and ingest every .docx file found.
 
     For each patient sub-folder, every .docx file is submitted to
     IngestionWorkflow.  Files whose SHA-256 hash is unchanged are skipped
-    automatically by parse_step.
+    automatically by parse_step.  A patient folder with the same name in
+    more than one root is treated as the same patient.
 
     Parameters
     ----------
-    patients_root:
-        Root directory containing one sub-folder per patient.
+    patients_roots:
+        List of root directories, each containing one sub-folder per patient.
     config:
         Application config object (AppConfig or equivalent).
     reid_map:
@@ -621,28 +622,29 @@ async def run_ingestion(
 
     results: list = []
 
-    for patient_folder in os.listdir(patients_root):
-        patient_path = os.path.join(patients_root, patient_folder)
-        if not os.path.isdir(patient_path):
-            continue
-
-        for filename in os.listdir(patient_path):
-            if not filename.endswith(".docx"):
-                continue
-            # Skip Word temp/lock files
-            if filename.startswith("~$") or filename.startswith("~"):
+    for patients_root in patients_roots:
+        for patient_folder in os.listdir(patients_root):
+            patient_path = os.path.join(patients_root, patient_folder)
+            if not os.path.isdir(patient_path):
                 continue
 
-            file_path = os.path.join(patient_path, filename)
-            try:
-                result = await workflow.run(file_path=file_path)
-                logger.info("run_ingestion: %s → %s", file_path, result)
-                results.append((file_path, str(result)))
-            except Exception as exc:
-                logger.error(
-                    "run_ingestion: unhandled error for %s: %s", file_path, exc
-                )
-                results.append((file_path, "error:unhandled"))
+            for filename in os.listdir(patient_path):
+                if not filename.endswith(".docx"):
+                    continue
+                # Skip Word temp/lock files
+                if filename.startswith("~$") or filename.startswith("~"):
+                    continue
+
+                file_path = os.path.join(patient_path, filename)
+                try:
+                    result = await workflow.run(file_path=file_path)
+                    logger.info("run_ingestion: %s → %s", file_path, result)
+                    results.append((file_path, str(result)))
+                except Exception as exc:
+                    logger.error(
+                        "run_ingestion: unhandled error for %s: %s", file_path, exc
+                    )
+                    results.append((file_path, "error:unhandled"))
 
     return results
 
@@ -661,7 +663,7 @@ if __name__ == "__main__":
         pinecone_index = init_pinecone(config.pinecone_api_key, config.pinecone.index_name)
 
         result = await run_ingestion(
-            patients_root=config.patients_root,
+            patients_roots=config.patients_roots,
             config=config,
             reid_map=reid_map,
             db_path=db_path,
