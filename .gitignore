@@ -35,6 +35,9 @@ htmlcov/
 .vscode/
 .idea/
 
+# Local Claude Code workspace (plans, skills, settings) — local tooling, not source
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
