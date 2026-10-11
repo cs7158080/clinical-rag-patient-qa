@@ -565,7 +565,7 @@ wheels = [
 [[package]]
 name = "clinical-rag"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "cohere" },
