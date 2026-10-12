@@ -26,9 +26,8 @@ select {direction: rtl;}
 textarea {direction: rtl;}
 .gr-dropdown {direction: rtl;}
 .gr-textbox {direction: rtl;}
-.gr-markdown {direction: rtl; text-align: right;}
-.gr-markdown ol, .gr-markdown ul {direction: rtl; text-align: right; margin-right: 1.5em; margin-left: 0;}
-.gr-markdown li {text-align: right;}
+.prose {direction: rtl; text-align: right;}
+.gradio-container .prose table th, .gradio-container .prose table td {text-align: right;}
 footer {display: none !important;}
 """
 

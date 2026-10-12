@@ -13,7 +13,7 @@ from app.prompts.qa import (
     SUMMARIZE_PROMPT, FIND_SPECIFIC_PROMPT, CHECK_DOMAIN_PROMPT,
     COMPARE_PROGRESS_PROMPT, PROGRESS_TREND_PROMPT, FAMILY_A_PROMPT,
     NO_RESULTS_MESSAGE, ERROR_MESSAGE, CANT_UNDERSTAND_MESSAGE,
-    REID_MAP_MISSING_WARNING
+    REID_MAP_MISSING_WARNING, ANSWER_TRUNCATED_WARNING
 )
 from app.config import AppConfig
 
@@ -57,6 +57,7 @@ class QueryWorkflow(Workflow):
             model=config.anthropic.generation_model,
             api_key=config.anthropic_api_key,
             temperature=config.anthropic.temperature_generation,
+            max_tokens=config.anthropic.max_tokens_generation,
         )
 
     @step
@@ -124,6 +125,9 @@ class QueryWorkflow(Workflow):
             answer = response.text.strip()
             if not answer:
                 return TokenizedAnswerEvent(answer=ERROR_MESSAGE)
+            if (response.raw or {}).get("stop_reason") == "max_tokens":
+                logger.warning("Answer truncated at max_tokens for intent=%s", params.intent)
+                answer += "\n\n" + ANSWER_TRUNCATED_WARNING
             logger.info(f"Getting response:{answer}")
             return TokenizedAnswerEvent(answer=answer)
         except Exception as e:
