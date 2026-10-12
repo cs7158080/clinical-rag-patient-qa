@@ -19,6 +19,7 @@ run_ingestion(patients_root, config, reid_map, db_path, pinecone_index)
 import hashlib
 import logging
 import os
+import traceback
 from typing import Union
 
 from llama_index.core.workflow import (  # type: ignore
@@ -62,6 +63,7 @@ from app.storage.models import (
 from app.storage.pinecone_client import delete_vectors, get_cohere_embedding, upsert_vectors
 from app.ingestion.adapter_a import detect_template_type, parse_family_a
 from app.ingestion.adapter_b import parse_treatment_plan
+from app.ingestion.result import IngestResult
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +87,24 @@ class DeidentifiedEvent(Event):
 
 
 class BlockedEvent(Event):
-    reason: str
+    reason: str        # code for the log (e.g. "ner_rescan")
+    message: str       # Hebrew, shown in the UI
     file_path: str
+
+
+# Hebrew UI messages. Generic on purpose: the found value goes to the log only
+# (written by the Pass 2 checks in validation.py).
+_UNKNOWN_TYPE_MSG = (
+    "סוג המסמך לא זוהה משם הקובץ — שם הקובץ צריך להתחיל ב'סיכום אבחון', "
+    "'סיכום טיפול' או 'תוכנית טיפול'"
+)
+_PRIVACY_SUFFIX = " — הקובץ לא נטען כדי להגן על הפרטיות"
+_VALIDATION_MESSAGES = {
+    "regex": "נמצא בטקסט פרט מזהה (ת.ז. / טלפון / דוא\"ל) שלא הוסר" + _PRIVACY_SUFFIX,
+    "reid_map": "נמצא בטקסט שם או פרט מזהה מוכר שלא הוסר" + _PRIVACY_SUFFIX,
+    "ner_rescan": "בדיקת הפרטיות מצאה שם שייתכן שלא הוסר" + _PRIVACY_SUFFIX,
+}
+_STALE_DELETE_MSG = "מחיקת הנתונים הקודמים של הקובץ נכשלה — הנתונים הקודמים נשמרו. נסי לטעון שוב"
 
 
 class FamilyAStoreEvent(Event):
@@ -140,14 +158,15 @@ class IngestionWorkflow(Workflow):
             file_bytes = open(file_path, "rb").read()
         except OSError as exc:
             logger.error("parse_step: cannot read file %s: %s", file_path, exc)
-            return StopEvent(result="error:unreadable")
+            return StopEvent(result=IngestResult(
+                "error", "לא ניתן לקרוא את הקובץ — ייתכן שהוא פתוח ב-Word. סגרי אותו ונסי שוב"))
 
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         existing_hash = get_file_hash(self._db_path, file_path)
 
         if existing_hash == file_hash:
             logger.info("parse_step: skipping unchanged file: %s", file_path)
-            return StopEvent(result="skipped")
+            return StopEvent(result=IngestResult("skipped"))
 
         # Detect template type from filename
         filename = os.path.basename(file_path)
@@ -158,7 +177,7 @@ class IngestionWorkflow(Workflow):
                 template_type = detect_template_type(filename)
                 if template_type is None:
                     logger.warning("parse_step: unknown Family A template for: %s", file_path)
-                    return StopEvent(result="unknown_template")
+                    return StopEvent(result=IngestResult("blocked", _UNKNOWN_TYPE_MSG))
                 parsed_data = parse_family_a(file_path, patient_folder_name, template_type)
 
 
@@ -168,11 +187,12 @@ class IngestionWorkflow(Workflow):
 
             else:
                 logger.warning("parse_step: unknown template type for file: %s", file_path)
-                return StopEvent(result="unknown_template")
+                return StopEvent(result=IngestResult("blocked", _UNKNOWN_TYPE_MSG))
 
-        except Exception as exc:
-            logger.error("parse_step: parsing failed for %s: %s", file_path, exc)
-            return StopEvent(result="error:parse_failed")
+        except Exception:
+            logger.exception("parse_step: parsing failed for %s", file_path)
+            return StopEvent(result=IngestResult(
+                "error", "שגיאה בקריאת תוכן המסמך — הפרטים נרשמו ביומן"))
 
         parsed_data["file_hash"] = file_hash
 
@@ -204,7 +224,11 @@ class IngestionWorkflow(Workflow):
                 "(conflict type: last_name_mismatch)",
                 file_path,
             )
-            return BlockedEvent(reason="name_conflict", file_path=file_path)
+            return BlockedEvent(
+                reason="name_conflict",
+                message="שם המטופל בכותרת הקובץ שונה משם התיקייה",
+                file_path=file_path,
+            )
 
         # Ensure the patient entity exists in the re-id map; the patient_id
         # IS the key of the patient's PERSON entry (identity by construction).
@@ -299,8 +323,10 @@ class IngestionWorkflow(Workflow):
                 file_path,
                 validation_result.failure_type,
             )
+            reason = validation_result.failure_type or "validation_failed"
             return BlockedEvent(
-                reason=validation_result.failure_type or "validation_failed",
+                reason=reason,
+                message=_VALIDATION_MESSAGES.get(reason, "בדיקת הפרטיות נכשלה" + _PRIVACY_SUFFIX),
                 file_path=file_path,
             )
 
@@ -319,7 +345,7 @@ class IngestionWorkflow(Workflow):
             ev.file_path,
             ev.reason,
         )
-        return StopEvent(result=f"blocked:{ev.reason}")
+        return StopEvent(result=IngestResult("blocked", ev.message))
 
     # ------------------------------------------------------------------
     # Step 4: Route
@@ -380,7 +406,7 @@ class IngestionWorkflow(Workflow):
         header: dict = data["header"]
 
         if not self._delete_stale_data(file_path):
-            return StopEvent(result="error:pinecone_delete_failed")
+            return StopEvent(result=IngestResult("error", _STALE_DELETE_MSG))
 
         # Upsert static patient metadata
         if header.get("date_of_birth"):
@@ -429,7 +455,7 @@ class IngestionWorkflow(Workflow):
             os.path.join(self._config.data_dir, "reid_map.json"), self._reid_map
         )
         logger.info("store_family_a_step: ingested Family A file: %s", file_path)
-        return StopEvent(result="ok")
+        return StopEvent(result=IngestResult("ok", warnings=data.get("warnings", [])))
 
     # ------------------------------------------------------------------
     # Step 5b: Embed treatment plan chunks
@@ -500,7 +526,7 @@ class IngestionWorkflow(Workflow):
         file_path: str = data["file_path"]
 
         if not self._delete_stale_data(file_path):
-            return StopEvent(result="error:pinecone_delete_failed")
+            return StopEvent(result=IngestResult("error", _STALE_DELETE_MSG))
 
         # Build Pinecone vector list
         pinecone_vectors: list[dict] = []
@@ -557,12 +583,18 @@ class IngestionWorkflow(Workflow):
             os.path.join(self._config.data_dir, "reid_map.json"), self._reid_map
         )
         logger.info("store_treatment_step: ingested treatment plan: %s", file_path)
-        return StopEvent(result="ok")
+        return StopEvent(result=IngestResult("ok", warnings=data.get("warnings", [])))
 
 
 # ---------------------------------------------------------------------------
 # Module-level entry point
 # ---------------------------------------------------------------------------
+
+def _failed_step(exc: BaseException) -> str:
+    """Name of the workflow step the exception came from (last *_step frame), or 'unknown'."""
+    names = [f.name for f in traceback.extract_tb(exc.__traceback__) if f.name.endswith("_step")]
+    return names[-1] if names else "unknown"
+
 
 async def run_ingestion(
     patients_roots: list,
@@ -593,8 +625,7 @@ async def run_ingestion(
 
     Returns
     -------
-    list of (file_path, result_str) tuples — one per .docx file processed.
-    result_str is one of: "ok", "skipped", "blocked:<reason>", "error:<reason>".
+    list of (file_path, IngestResult) tuples — one per .docx file processed.
     """
     # De-id gate: the NER model is mandatory in production (fail-closed).
     try:
@@ -639,12 +670,15 @@ async def run_ingestion(
                 try:
                     result = await workflow.run(file_path=file_path)
                     logger.info("run_ingestion: %s → %s", file_path, result)
-                    results.append((file_path, str(result)))
                 except Exception as exc:
-                    logger.error(
-                        "run_ingestion: unhandled error for %s: %s", file_path, exc
+                    step_name = _failed_step(exc)
+                    logger.exception(
+                        "run_ingestion: unhandled error in %s for %s", step_name, file_path
                     )
-                    results.append((file_path, "error:unhandled"))
+                    result = IngestResult(
+                        "error", f"שגיאה לא צפויה (שלב: {step_name}) — הפרטים נרשמו ביומן"
+                    )
+                results.append((file_path, result))
 
     return results
 

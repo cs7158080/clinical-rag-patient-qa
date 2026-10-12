@@ -86,12 +86,16 @@ async def reingest(config, db_path: str, reid_map_path: str) -> None:
     ok = skipped = blocked = error = 0
     for path, result in results:
         label = _label_for(path, config.patients_roots)
-        print(f"  {result:30s}  {label}")
-        if result == "ok":
+        print(f"  {result.status:8s}  {label}")
+        if result.message:
+            print(f"            {result.message}")
+        for w in result.warnings:
+            print(f"            ! {w}")
+        if result.status == "ok":
             ok += 1
-        elif result == "skipped":
+        elif result.status in ("skipped", "ignored"):
             skipped += 1
-        elif result.startswith("blocked"):
+        elif result.status == "blocked":
             blocked += 1
         else:
             error += 1

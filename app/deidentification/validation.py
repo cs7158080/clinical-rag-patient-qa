@@ -53,9 +53,10 @@ _TOKEN_PATTERN = re.compile(r"^(PERSON|INST)_[0-9a-f]{64}$")
 def _check_regex_patterns(text: str) -> bool:
     """Return True (clean) if none of the known PII regex patterns match *text*."""
     for name, pattern in _REGEX_PATTERNS.items():
-        if re.search(pattern, text):
+        match = re.search(pattern, text)
+        if match:
             logger.warning(
-                "validation: regex check failed — pattern '%s' matched in text.", name
+                "validation: regex check failed — pattern '%s' matched %r.", name, match.group(0)
             )
             return False
     return True
@@ -69,7 +70,8 @@ def _check_reid_map_values(text: str, reid_map: dict) -> bool:
     for raw_value in reid_map.values():
         if raw_value and raw_value in text:
             logger.warning(
-                "validation: reid_map check failed — a plaintext PII value was found in the text."
+                "validation: reid_map check failed — plaintext value %r found in the text.",
+                raw_value,
             )
             return False
     return True
@@ -129,8 +131,9 @@ def _check_ner_rescan(text: str) -> bool:
 
         label = entity.get("label", "?")
         logger.warning(
-            "validation: NER re-scan found unreplaced %s entity (token form not matched).",
+            "validation: NER re-scan found unreplaced %s entity %r.",
             label,
+            entity_text,
         )
         return False
 

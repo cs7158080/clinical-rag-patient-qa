@@ -413,10 +413,10 @@ async def run_flows_synthetic(auditor, config, db_path, reid_map_path, index):
         reid_map=reid_map, db_path=db_path, pinecone_index=index,
     )
     for path, result in results:
-        print(f"  ingest {result:20s} {os.path.basename(path)}")
-        if result != "ok":
+        print(f"  ingest {result.status:20s} {os.path.basename(path)}")
+        if result.status != "ok":
             auditor.failures.append(f"[ingestion] file not ingested cleanly: "
-                                    f"{os.path.basename(path)} → {result}")
+                                    f"{os.path.basename(path)} → {result.status}: {result.message}")
 
     reid_map = load_reid_map(reid_map_path)
     patient_id = patient_id_from_folder(reid_map, SYN_FOLDER)
