@@ -13,6 +13,7 @@ from app.deidentification.reid_map import (
 from app.generation.qa import run_query
 from app.generation.summary_generator import run_generate_summary
 from app.ingestion.pipeline import run_ingestion
+from app.ingestion.result import format_report
 
 logger = logging.getLogger(__name__)
 
@@ -121,34 +122,16 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
         try:
             results = await run_ingestion(existing_roots, config, reid_map, db_path, pinecone_index)
         except Exception as e:
-            logger.error(f"Ingestion error: {e}")
+            logger.exception("Ingestion error")
             return f"שגיאה בטעינה: {e}"
 
         if not results:
             return "לא נמצאו קבצי docx בתיקיית המטופלים."
 
-        ok = skipped = blocked = errors = 0
-        lines = []
-        for file_path, result in results:
-            filename = os.path.basename(file_path)
-            if result == "ok":
-                ok += 1
-                lines.append(f"✓  {filename}")
-            elif result == "skipped":
-                skipped += 1
-                lines.append(f"○  {filename} (ללא שינוי)")
-            elif result.startswith("blocked:"):
-                blocked += 1
-                reason = result.split(":", 1)[1]
-                lines.append(f"✗  {filename} (חסום: {reason})")
-            else:
-                errors += 1
-                lines.append(f"✗  {filename} ({result})")
-
-        summary = f"סיום טעינה — {ok} חדשים, {skipped} ללא שינוי, {blocked} חסומים, {errors} שגיאות\n\n"
+        report = format_report(results)
         if missing_roots:
-            summary = "אזהרה: תיקיות שלא נמצאו ולא נטענו: " + ", ".join(missing_roots) + "\n\n" + summary
-        return summary + "\n".join(lines)
+            report = "אזהרה: תיקיות שלא נמצאו ולא נטענו: " + ", ".join(missing_roots) + "\n\n" + report
+        return report
 
     async def generate_summary(patient_id: str, date_from: str, date_to: str):
         if not patient_id:

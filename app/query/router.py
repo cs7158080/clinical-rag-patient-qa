@@ -6,7 +6,7 @@ strategy to use. All routing logic lives here — business logic never decides
 retrieval strategy; only this module does.
 
 Strategies:
-    'family_a_sqlite'         — fetch from family_a_sections (diagnosis / clinic_visit_summary)
+    'family_a_sqlite'         — fetch from document_sections (diagnosis / clinic_visit_summary)
     'treatment_sessions_sqlite' — fetch from treatment_sessions (treatment_plan summarize)
     'domain_sqlite'           — exact lookup in domain_findings by domain_name
     'pinecone'                — semantic search via Pinecone

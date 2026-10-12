@@ -106,7 +106,7 @@ def _domain_chunks(db_path: str, patient_id: str, session_date: str) -> list[str
 
 
 def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
-    """Fetch from family_a_sections, applying date resolution per Step 6."""
+    """Fetch from document_sections, applying date resolution per Step 6."""
     # date resolution: date_latest=true OR (date_from is None and date_latest=False)
     # → treat as date_latest=True → fetch all sections of the latest document
     if params.session_limit is not None or params.date_from is None:
@@ -121,7 +121,7 @@ def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
         else:
             texts = []
     else:
-        chunks = db.fetch_family_a_sections(
+        chunks = db.fetch_document_sections(
             db_path,
             params.patient_id,
             params.template_type,
@@ -145,7 +145,7 @@ def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
         params.patient_id,
         params.template_type,
     )
-    return RetrievalResult(chunks=texts, source_table='family_a_sections', count=len(texts))
+    return RetrievalResult(chunks=texts, source_table='document_sections', count=len(texts))
 
 
 def _fetch_treatment_sessions(db_path: str, params: QueryParams) -> RetrievalResult | str:
