@@ -12,6 +12,7 @@ Rules enforced in every prompt (per Prompt Engineering Guidelines):
 3. Treat PERSON_xxx and INST_xxx tokens as normal person/organization names.
 4. Write dates in Hebrew format (e.g. "7 במרץ 2025").
 5. If context is insufficient, say so explicitly.
+6. Markdown formatting: bold headings, bullets, tables only for comparisons.
 """
 
 # ---------------------------------------------------------------------------
@@ -23,10 +24,16 @@ Answer solely based on the information provided below. Do not infer beyond what 
 If the information is insufficient — say so explicitly.
 Tokens such as PERSON_xxx and INST_xxx are names of people and organizations — use them naturally.
 Write dates in Hebrew (for example: "7 במרץ 2025").
-Format your response as plain text, one item per line — do not use numbered or bulleted lists.
-Keep every line short and easy to scan — one fact or observation per line, at most
-~12 words. Split a long sentence into several short lines rather than writing one
-long, dense sentence.
+Format your response in Markdown, following these rules:
+- Group the answer by topic or clinical domain. Start each group with a bold heading on
+  its own line (for example: **שפה רצפטיבית**), followed by a blank line.
+- Under each heading, write a bulleted list ("- ") with one fact or observation per bullet,
+  at most ~12 words each. Split a long sentence into several short bullets rather than
+  writing one long, dense sentence. Do not use numbered lists.
+- Use a Markdown table ONLY when comparing across dates or domains (for example, progress
+  over time or before/after a date). Rows = dates or domains; keep cells short.
+- Use bold sparingly inside bullets — only for key findings. No other decorative formatting
+  (no emojis, no headings with #, no horizontal rules).
 assume that the context you recieved is within the time range desired by the user.
 You must provide an answer that is as detailed as possible and includes as much information as possible - based solely on the information I have given you."""
 
