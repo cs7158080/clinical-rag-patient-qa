@@ -43,18 +43,23 @@ All patient data is de-identified before leaving the local machine. Real names a
 
 2. Edit `config.yaml` to set `patients_root` to the path of your patient files folder — a single path, or a YAML list of paths to scan several folders. A patient folder with the same name in more than one root is treated as the same patient.
 
-3. Run setup (installs dependencies, initializes the database, converts the NER model to ONNX):
-   ```
-   setup.bat
-   ```
+3. Double-click `setup.bat`. It installs Python and the dependencies, checks the NER model,
+   initializes the database, opens `.env` in Notepad if it is missing, and creates a
+   **"מערכת שאלות ותשובות"** shortcut on the desktop and in the Start menu.
+
+   The shortcut points to the folder `setup.bat` was run from — if the project folder is
+   moved, run `setup.bat` again.
 
 ## Daily use
 
-```
-start.bat
-```
+Double-click the **מערכת שאלות ותשובות** icon (desktop or Start menu). The app opens in its
+own window — no console, no browser. Closing the window shuts everything down. Opening it
+again while it is already running just brings the existing window to the front.
 
-Open `http://localhost:7860` in your browser.
+If something goes wrong at startup (missing `.env`, port in use, no connection to Pinecone…)
+a Hebrew message explains what to do; details are in `logs/desktop.log`.
+
+**Developers:** `start.bat` still runs the app with a console; open `http://localhost:7860`.
 
 - Tab 1 (Q&A): select a patient, type a question in Hebrew, click Submit.
 - Tab 2 (Generate summary): select a patient and a session date, click Generate to create a clinic visit summary `.docx` in the patient folder.
@@ -79,8 +84,9 @@ Open `http://localhost:7860` in your browser.
 ├── config.yaml             # Non-secret configuration
 ├── .env.example            # API key template
 ├── pyproject.toml          # Project dependencies (uv)
-├── setup.bat               # First-time setup script
-└── start.bat               # Launch script
+├── setup.bat               # First-time setup script (creates the shortcuts)
+├── create_shortcut.ps1     # Desktop + Start menu shortcut (called by setup.bat)
+└── start.bat               # Developer launch script (with console)
 ```
 
 ## Requirements
