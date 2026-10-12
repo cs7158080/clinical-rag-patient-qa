@@ -11,6 +11,7 @@ never searches inside free text, so "1/2 כוס" or "28/11 –" inside a sentenc
 never mistaken for a date (20c).
 """
 
+import calendar
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -52,7 +53,9 @@ def parse_date(text: str) -> Optional[ParsedDate]:
     """Parse *text* (the whole string, stripped) as one written date.
 
     Returns None when the text is not shaped like a date.
-    Raises DateError when it is shaped like a date but does not exist (31/11/2025).
+    Raises DateError when the month is not 1-12 or the day is not 1-31.
+    A day past the end of its month (31/11) is accepted here; resolve_dates
+    moves it to the month's last day with a warning (item 10).
     """
     raw = text.strip()
     m = _DATE_RE.fullmatch(raw)
@@ -64,10 +67,8 @@ def parse_date(text: str) -> Optional[ParsedDate]:
         year = int(m["year"])
         if len(m["year"]) == 2:
             year += 2000                  # 20a: "1/1/24" → 2024
-    try:
-        date(year or 2000, month, day)    # 2000 is a leap year, so "29/2" without a year passes
-    except ValueError:
-        raise DateError(f"תאריך לא תקין: '{raw}' — אין תאריך כזה בלוח השנה") from None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        raise DateError(f"תאריך לא תקין: '{raw}' — אין תאריך כזה בלוח השנה")
     return ParsedDate(raw=raw, day=day, month=month, year=year)
 
 
@@ -89,8 +90,10 @@ def resolve_dates(
     Dates are stored as written, never corrected (21a). Warnings: every inferred
     year; (2) in the future; (3) before *start*.
 
-    Raises DateError when a year is missing and no reference date exists, or the
-    inferred date does not exist (29/2 in a non-leap year).
+    A day past the end of its month (31/11/2025, 29/2 in a non-leap year) is stored
+    as the month's last day, with a warning (item 10).
+
+    Raises DateError when a year is missing and no reference date exists.
     """
     today = today or date.today()
     result = ResolvedDates(dates=[])
@@ -98,17 +101,17 @@ def resolve_dates(
 
     for i, item in enumerate(items):
         if item.year is not None:
-            d = date(item.year, item.month, item.day)
+            year = item.year
         else:
             following = next((x for x in items[i + 1:] if x.year is not None), None)
             year = _infer_year(item, prev or start, following)
-            try:
-                d = date(year, item.month, item.day)
-            except ValueError:
-                raise DateError(
-                    f"תאריך לא תקין: '{item.raw}' — אין תאריך כזה בשנה {year}"
-                ) from None
             result.warnings.append(f"התאריך '{item.raw}' נכתב בלי שנה — הונחה השנה {year}")
+
+        d = _clamp_to_month(year, item.month, item.day)
+        if d.day != item.day:
+            result.warnings.append(
+                f"התאריך '{item.raw}' לא קיים — נשמר כ-{format_date(d)}, כדאי לבדוק"
+            )
 
         if d > today:
             result.warnings.append(f"התאריך '{item.raw}' עתידי — כדאי לבדוק")
@@ -132,3 +135,8 @@ def _infer_year(item: ParsedDate, ref: Optional[date], following: Optional[Parse
     raise DateError(
         f"התאריך '{item.raw}' נכתב בלי שנה, ואין תאריך אחר שממנו אפשר להסיק אותה"
     )
+
+
+def _clamp_to_month(year: int, month: int, day: int) -> date:
+    """date(year, month, day), with a day past the month's end moved to its last day (item 10)."""
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))

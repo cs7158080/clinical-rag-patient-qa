@@ -54,7 +54,7 @@ def test_parse_date_not_a_date(text):
 
 
 @pytest.mark.parametrize("text", [
-    "31/11/2025", "29/2/2025", "0/5/2026", "12/13/2026", "32/1",
+    "0/5/2026", "12/13/2026", "32/1",
 ])
 def test_parse_date_impossible_raises_hebrew(text):
     with pytest.raises(DateError, match="תאריך לא תקין"):
@@ -117,9 +117,21 @@ def test_resolve_partial_without_reference_raises():
         resolve_dates(_seq("20/07"), today=TODAY)
 
 
-def test_resolve_inferred_29_feb_in_non_leap_year_raises():
-    with pytest.raises(DateError, match="תאריך לא תקין"):
-        resolve_dates(_seq("01/01/2025", "29/2"), today=TODAY)
+def test_parse_keeps_day_past_month_end():
+    p = parse_date("31/11/2025")
+    assert (p.day, p.month, p.year) == (31, 11, 2025)
+
+
+def test_resolve_day_past_month_end_becomes_last_day():   # C2 פנחס
+    r = resolve_dates(_seq("31/11/2025"), today=TODAY)
+    assert r.dates == [date(2025, 11, 30)]
+    assert r.warnings == ["התאריך '31/11/2025' לא קיים — נשמר כ-30/11/2025, כדאי לבדוק"]
+
+
+def test_resolve_inferred_29_feb_in_non_leap_year_becomes_28():
+    r = resolve_dates(_seq("01/01/2025", "29/2"), today=TODAY)
+    assert r.dates[1] == date(2025, 2, 28)
+    assert len(r.warnings) == 2          # inferred year + day moved
 
 
 def test_out_of_order_is_not_warned():      # rule (1) removed 2026-10-12
