@@ -29,6 +29,7 @@ ICON_PATH = os.path.join(ROOT_DIR, "app", "assets", "app.ico")
 
 WINDOW_TITLE = "מערכת שאלות ותשובות — תיקי מטופלים"
 MUTEX_NAME = "Local\\ClinicalRAG.Desktop"
+APP_USER_MODEL_ID = "ClinicalRAG.Desktop"
 STARTUP_TIMEOUT_S = 60
 
 ERROR_ALREADY_EXISTS = 183
@@ -123,6 +124,12 @@ def redirect_std_streams(log_path: str = BOOT_LOG) -> None:
 def show_message(text: str, icon: int = MB_ICONERROR) -> None:
     flags = icon | MB_SETFOREGROUND | MB_RIGHT | MB_RTLREADING
     ctypes.windll.user32.MessageBoxW(None, text, WINDOW_TITLE, flags)
+
+
+def set_taskbar_identity(app_id: str = APP_USER_MODEL_ID) -> None:
+    """Without its own AppUserModelID the window is grouped under pythonw.exe
+    and the taskbar shows the Python icon instead of the app icon."""
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
 
 
 def acquire_single_instance_lock(name: str = MUTEX_NAME):
@@ -238,6 +245,7 @@ def run() -> int:
             show_message(MSG_ALREADY_OPEN, MB_ICONINFORMATION)
         return 0
 
+    set_taskbar_identity()
     state: dict = {}
     try:
         import webview
