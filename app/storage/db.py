@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DDL = """
-CREATE TABLE IF NOT EXISTS family_a_sections (
+CREATE TABLE IF NOT EXISTS document_sections (
     patient_id          TEXT NOT NULL,
     template_type       TEXT NOT NULL,
     session_date        TEXT NOT NULL,
@@ -127,12 +127,12 @@ def mark_file_ingested(db_path: str, file_path: str, file_hash: str) -> None:
 # ---------------------------------------------------------------------------
 
 def insert_family_a_chunk(db_path: str, chunk: FamilyAChunk) -> None:
-    """INSERT OR REPLACE a FamilyAChunk into family_a_sections."""
+    """INSERT OR REPLACE a FamilyAChunk into document_sections."""
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO family_a_sections
+                INSERT OR REPLACE INTO document_sections
                     (patient_id, template_type, session_date, section,
                      text_deidentified, source_file_path)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -148,7 +148,7 @@ def insert_family_a_chunk(db_path: str, chunk: FamilyAChunk) -> None:
             )
             conn.commit()
         logger.info(
-            "Inserted family_a_sections row: patient=%s type=%s date=%s section=%s",
+            "Inserted document_sections row: patient=%s type=%s date=%s section=%s",
             chunk.patient_id,
             chunk.template_type,
             chunk.session_date,
@@ -351,21 +351,28 @@ def delete_rows_for_file(db_path: str, file_path: str) -> None:
     """Delete all rows produced by *file_path* across all content tables in one transaction.
 
     domain_findings does not carry source_file_path (per schema). Its rows share
-    (patient_id, session_date) with family_a_sections (diagnosis). We collect those
-    pairs first — inside the same transaction — then delete domain_findings before
-    deleting family_a_sections.
+    (patient_id, session_date) with the document_sections rows of a diagnosis /
+    clinic_visit_summary. We collect those pairs first — inside the same transaction —
+    then delete domain_findings before deleting document_sections.
+
+    Only diagnosis / clinic_visit_summary rows cascade: a treatment plan also writes
+    document_sections rows (header fields, PLAN.md O4.1) but has no domains, so its
+    pairs must not delete the domains of a diagnosis with the same date.
+    Known limitation: a diagnosis and a clinic_visit_summary of the same patient on
+    the same date share domain_findings rows (PLAN.md T0 part 3, decision 5).
     """
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute("BEGIN")
 
-            # Step 1: collect (patient_id, session_date) pairs from family_a_sections
+            # Step 1: collect (patient_id, session_date) pairs from document_sections
             # BEFORE deleting them — needed to cascade into domain_findings.
             pairs = conn.execute(
                 """
                 SELECT DISTINCT patient_id, session_date
-                FROM family_a_sections
+                FROM document_sections
                 WHERE source_file_path = ?
+                  AND template_type IN ('diagnosis', 'clinic_visit_summary')
                 """,
                 (file_path,),
             ).fetchall()
@@ -379,7 +386,7 @@ def delete_rows_for_file(db_path: str, file_path: str) -> None:
 
             # Step 3: delete from the three tables that carry source_file_path
             conn.execute(
-                "DELETE FROM family_a_sections WHERE source_file_path = ?",
+                "DELETE FROM document_sections WHERE source_file_path = ?",
                 (file_path,),
             )
             conn.execute(
@@ -399,21 +406,21 @@ def delete_rows_for_file(db_path: str, file_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Read helpers — family_a_sections
+# Read helpers — document_sections
 # ---------------------------------------------------------------------------
 
-def fetch_family_a_sections(
+def fetch_document_sections(
     db_path: str,
     patient_id: str,
     template_type: str,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
 ) -> list[FamilyAChunk]:
-    """Fetch all family_a_sections rows for patient + template_type, with optional date filter."""
+    """Fetch all document_sections rows for patient + template_type, with optional date filter."""
     query = """
         SELECT patient_id, template_type, session_date, section,
                text_deidentified, source_file_path
-        FROM family_a_sections
+        FROM document_sections
         WHERE patient_id = ? AND template_type = ?
     """
     params: list = [patient_id, template_type]
@@ -446,13 +453,13 @@ def fetch_family_a_sections(
 def fetch_latest_family_a(
     db_path: str, patient_id: str, template_type: str
 ) -> Optional[FamilyAChunk]:
-    """Return the most recent family_a_sections row for patient + template_type."""
+    """Return the most recent document_sections row for patient + template_type."""
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT patient_id, template_type, session_date, section,
                    text_deidentified, source_file_path
-            FROM family_a_sections
+            FROM document_sections
             WHERE patient_id = ? AND template_type = ?
             ORDER BY session_date DESC
             LIMIT 1
@@ -764,7 +771,7 @@ def fetch_latest_family_a_doc(
     with sqlite3.connect(db_path) as conn:
         max_date_row = conn.execute(
             """
-            SELECT MAX(session_date) FROM family_a_sections
+            SELECT MAX(session_date) FROM document_sections
             WHERE patient_id = ? AND template_type = ?
             """,
             (patient_id, template_type),
@@ -774,7 +781,7 @@ def fetch_latest_family_a_doc(
         return None
 
     max_date = max_date_row[0]
-    rows = fetch_family_a_sections(db_path, patient_id, template_type, max_date, max_date)
+    rows = fetch_document_sections(db_path, patient_id, template_type, max_date, max_date)
     if not rows:
         return None
     return {
@@ -849,7 +856,7 @@ def get_patient_files(db_path: str, patient_id: str) -> list[str]:
             SELECT DISTINCT source_file_path FROM treatment_goals
             WHERE patient_id = ? AND source_file_path IS NOT NULL
             UNION
-            SELECT DISTINCT source_file_path FROM family_a_sections
+            SELECT DISTINCT source_file_path FROM document_sections
             WHERE patient_id = ? AND source_file_path IS NOT NULL
             ORDER BY source_file_path ASC
             """,

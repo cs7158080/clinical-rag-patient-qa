@@ -108,7 +108,7 @@ class QueryWorkflow(Workflow):
             elif params.intent == 'check_domain':
                 context = '\n---\n'.join(result.chunks)
                 prompt = CHECK_DOMAIN_PROMPT.format(domain=params.topic or '', context=context, question=question)
-            elif result.source_table == 'family_a_sections':
+            elif result.source_table == 'document_sections':
                 context = '\n---\n'.join(result.chunks)
                 prompt = FAMILY_A_PROMPT.format(context=context, question=question)
             else:

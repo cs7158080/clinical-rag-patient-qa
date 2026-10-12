@@ -20,7 +20,7 @@ from app.storage.models import (
 )
 from app.storage.db import (
     insert_family_a_chunk,
-    fetch_family_a_sections,
+    fetch_document_sections,
     insert_treatment_session,
     fetch_treatment_sessions,
     upsert_patient_metadata,
@@ -217,7 +217,7 @@ def test_db_insert_and_fetch(db_path):
     )
 
     insert_family_a_chunk(db_path, chunk)
-    rows = fetch_family_a_sections(
+    rows = fetch_document_sections(
         db_path,
         patient_id=_PATIENT_ID,
         template_type="diagnosis",
@@ -234,7 +234,7 @@ def test_db_insert_and_fetch(db_path):
 
 
 def test_db_insert_family_a_date_filter(db_path):
-    """fetch_family_a_sections with date filter returns only matching rows."""
+    """fetch_document_sections with date filter returns only matching rows."""
     for i, date in enumerate(["2025-01-01", "2025-03-01", "2025-06-01"]):
         chunk = FamilyAChunk(
             patient_id=_PATIENT_ID,
@@ -245,7 +245,7 @@ def test_db_insert_family_a_date_filter(db_path):
         )
         insert_family_a_chunk(db_path, chunk)
 
-    rows = fetch_family_a_sections(
+    rows = fetch_document_sections(
         db_path,
         patient_id=_PATIENT_ID,
         template_type="clinic_visit_summary",
