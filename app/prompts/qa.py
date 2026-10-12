@@ -113,3 +113,4 @@ MISSING_TEMPLATE_MESSAGE = "ציני על איזה סוג מסמך את שואל
 NO_SESSIONS_BEFORE = "לא נמצאו פגישות לפני התאריך המבוקש"
 NO_SESSIONS_AFTER = "לא נמצאו פגישות אחרי התאריך המבוקש"
 REID_MAP_MISSING_WARNING = "לא ניתן להציג שמות — מפת הזיהוי חסרה"
+ANSWER_TRUNCATED_WARNING = "⚠️ התשובה ארוכה מדי ונקטעה. נסי לשאול שאלה ממוקדת יותר."
