@@ -65,3 +65,34 @@ def test_unhandled_exception_becomes_hebrew_error_with_traceback(tmp_path, monke
     record = next(r for r in caplog.records if "unhandled error" in r.getMessage())
     assert record.exc_info is not None                       # full traceback logged
     assert path in record.getMessage()
+
+
+def test_dry_run_stops_before_storage(tmp_path, monkeypatch):
+    from docx import Document
+    from app.deidentification import validation
+
+    patient = tmp_path / "ישראל ישראלי"
+    patient.mkdir()
+    doc = Document()
+    for line in ['בס"ד', "ישראל ישראלי", "01/03/2026", "שיחה עם ההורים."]:
+        doc.add_paragraph(line)
+    doc.save(patient / "תוכנית טיפול ישראל ישראלי.docx")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("dry run must not reach the DB or external services")
+
+    monkeypatch.setattr(pipeline, "load_ner_model", lambda models_dir: None)
+    monkeypatch.setattr(validation, "_check_ner_rescan", lambda text: True)
+    for name in ("get_file_hash", "get_cohere_embedding", "upsert_vectors",
+                 "mark_file_ingested", "save_reid_map"):
+        monkeypatch.setattr(pipeline, name, forbidden)
+    config = SimpleNamespace(models_dir="", run_mode="test", data_dir=str(tmp_path))
+    reid_map = {}
+
+    results = asyncio.run(pipeline.run_ingestion(
+        [str(tmp_path)], config, reid_map, None, None, dry_run=True))
+
+    [(path, result)] = results
+    assert result.status == "ok", result.message
+    assert result.counts == {"sections": 0, "domains": 0, "goals": 0, "sessions": 1}
+    assert reid_map                      # patient token added — in memory only

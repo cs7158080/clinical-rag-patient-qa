@@ -14,6 +14,7 @@ class IngestResult:
     status: Status
     message: str = ""                                    # Hebrew; empty for ok / skipped / ignored
     warnings: list[str] = field(default_factory=list)    # Hebrew; one ⚠ line each in the report
+    counts: dict[str, int] = field(default_factory=dict) # dry run only: sections/domains/goals/sessions
 
 
 def format_report(results: list[tuple[str, IngestResult]]) -> str:

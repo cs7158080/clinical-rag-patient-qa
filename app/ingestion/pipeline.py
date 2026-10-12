@@ -134,6 +134,7 @@ class IngestionWorkflow(Workflow):
         reid_map: dict,
         db_path: str,
         pinecone_index,
+        dry_run: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -141,6 +142,8 @@ class IngestionWorkflow(Workflow):
         self._reid_map = reid_map
         self._db_path = db_path
         self._pinecone_index = pinecone_index
+        # Dry run: stop after de-id + Pass 2 (route_step). No DB, Cohere or Pinecone access.
+        self._dry_run = dry_run
 
     # ------------------------------------------------------------------
     # Step 1: Parse
@@ -162,9 +165,8 @@ class IngestionWorkflow(Workflow):
                 "error", "לא ניתן לקרוא את הקובץ — ייתכן שהוא פתוח ב-Word. סגרי אותו ונסי שוב"))
 
         file_hash = hashlib.sha256(file_bytes).hexdigest()
-        existing_hash = get_file_hash(self._db_path, file_path)
 
-        if existing_hash == file_hash:
+        if not self._dry_run and get_file_hash(self._db_path, file_path) == file_hash:
             logger.info("parse_step: skipping unchanged file: %s", file_path)
             return StopEvent(result=IngestResult("skipped"))
 
@@ -354,8 +356,20 @@ class IngestionWorkflow(Workflow):
     @step
     async def route_step(
         self, ctx: Context, ev: DeidentifiedEvent
-    ) -> Union[FamilyAStoreEvent, TreatmentEmbedEvent]:
-        """Route de-identified data to the correct storage branch."""
+    ) -> Union[FamilyAStoreEvent, TreatmentEmbedEvent, StopEvent]:
+        """Route de-identified data to the correct storage branch (dry run: stop here)."""
+        if self._dry_run:
+            data = ev.parsed_data
+            return StopEvent(result=IngestResult(
+                "ok",
+                warnings=data.get("warnings", []),
+                counts={
+                    "sections": len(data.get("sections", {})),
+                    "domains": len(data.get("domains", {})),
+                    "goals": len(data.get("goals_rows", [])),
+                    "sessions": len(data.get("session_blocks", [])),
+                },
+            ))
         if ev.template_type in ("diagnosis", "clinic_visit_summary"):
             return FamilyAStoreEvent(parsed_data=ev.parsed_data)
         return TreatmentEmbedEvent(parsed_data=ev.parsed_data)
@@ -602,6 +616,7 @@ async def run_ingestion(
     reid_map: dict,
     db_path: str,
     pinecone_index,
+    dry_run: bool = False,
 ) -> list:
     """Walk every patients root directory and ingest every .docx file found.
 
@@ -622,6 +637,9 @@ async def run_ingestion(
         Absolute path to the SQLite database file.
     pinecone_index:
         Initialised Pinecone Index object (from init_pinecone).
+    dry_run:
+        Stop after de-identification + Pass 2; nothing is stored or sent to
+        Cohere / Pinecone, and the file hash is not checked (scripts/diagnose_ingestion.py).
 
     Returns
     -------
@@ -648,6 +666,7 @@ async def run_ingestion(
         reid_map=reid_map,
         db_path=db_path,
         pinecone_index=pinecone_index,
+        dry_run=dry_run,
         timeout=300,
     )
 
