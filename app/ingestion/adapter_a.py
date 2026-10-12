@@ -78,31 +78,6 @@ _SIGNATURE_SENTINEL = "מ.ר."
 
 
 # ---------------------------------------------------------------------------
-# Template type detection
-# ---------------------------------------------------------------------------
-
-def detect_template_type(filename: str) -> Optional[str]:
-    """Detect the Family A template type from the document filename.
-
-    Parameters
-    ----------
-    filename:
-        The basename of the .docx file (with or without extension).
-
-    Returns
-    -------
-    'diagnosis' if the filename starts with 'סיכום אבחון',
-    'clinic_visit_summary' if it starts with 'סיכום טיפול',
-    None otherwise.
-    """
-    if filename.startswith("סיכום אבחון"):
-        return "diagnosis"
-    if filename.startswith("סיכום טיפול"):
-        return "clinic_visit_summary"
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Header field extraction
 # ---------------------------------------------------------------------------
 
