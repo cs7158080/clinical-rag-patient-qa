@@ -81,6 +81,21 @@ _SIGNATURE_SENTINEL = "מ.ר."
 # Header field extraction
 # ---------------------------------------------------------------------------
 
+def _lines(paragraphs) -> list[str]:
+    """Every non-empty line of *paragraphs*, stripped (PLAN.md item 11).
+
+    A Shift+Enter line break inside a paragraph comes through python-docx as
+    '\\n'. Heading and content often share one paragraph that way, so each
+    line is handled as a paragraph of its own.
+    """
+    return [
+        line.strip()
+        for para in paragraphs
+        for line in para.text.split("\n")
+        if line.strip()
+    ]
+
+
 def extract_header_fields(doc) -> dict:
     """Scan the first ~10 paragraphs of *doc* for known header field patterns.
 
@@ -120,11 +135,8 @@ def extract_header_fields(doc) -> dict:
         ("hmo_name",      re.compile(r"(?:קופת חולים|HMO)\s*[:\s]\s*(.+)", re.IGNORECASE)),
     ]
 
-    paragraphs = doc.paragraphs[:10]
-    for para in paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
+    # Header lives in the first 10 paragraphs; each may hold several lines (item 11).
+    for text in _lines(doc.paragraphs[:10]):
         for field_key, pattern in patterns:
             if result[field_key] is not None:
                 # Already found this field
@@ -190,14 +202,7 @@ def parse_family_a(
     domain_lines: dict[str, list[str]] = {}
     blocked: bool = False  # True once signature block sentinel is encountered
 
-    for para in doc.paragraphs:
-        raw_text = para.text
-        stripped = raw_text.strip()
-
-        # Empty paragraph — skip (but reset blocked flag per section only)
-        if not stripped:
-            continue
-
+    for stripped in _lines(doc.paragraphs):
         # --- Signature block sentinel ---
         # If the clinician licence marker or the closing salutation appears,
         # stop collecting for the current section.
