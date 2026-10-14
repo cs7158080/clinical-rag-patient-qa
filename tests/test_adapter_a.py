@@ -1,7 +1,27 @@
 """Tests for the Family A parser (PLAN.md items 8–14b)."""
 
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from app.ingestion import pipeline
 from app.ingestion.adapter_a import parse_family_a
+from app.ingestion.dates import DateError
+from app.ingestion.result import ParseBlocked
 from tests.fixtures.docx_factory import write_docx
+
+_PATIENT = "ישראל ישראלי"
+
+
+def _family_a(tmp_path, top: list[str]) -> str:
+    """A minimal diagnosis whose header (after בס"ד) is *top*."""
+    return str(write_docx(tmp_path / f"סיכום אבחון {_PATIENT}.docx",
+                          ['בס"ד', *top, f"שם: {_PATIENT}", "רקע:", "ילד בן שש."]))
+
+
+def _parse(path):
+    return parse_family_a(path, _PATIENT, "diagnosis")
 
 
 def test_shift_enter_lines_are_parsed_as_paragraphs(tmp_path):
@@ -21,3 +41,64 @@ def test_shift_enter_lines_are_parsed_as_paragraphs(tmp_path):
     assert parsed["sections"]["רקע"] == "ילד בן שש, דובר עברית."
     assert parsed["sections"]["ממצאי_האבחון"] == "להלן תיאור יכולותיו:"
     assert parsed["domains"] == {"הבנת שפה": "הבנה תקינה.", "תחביר": "משפטים פשוטים."}
+
+
+@pytest.mark.parametrize("top, expected", [
+    (["01/03/2026", "לכבוד", "הנדון: סיכום אבחון"], "2026-03-01"),   # item 8: bare date line
+    (["תאריך: 1/3/26", "הנדון: סיכום אבחון"], "2026-03-01"),         # 'תאריך:' + 2-digit year
+    (["לכבוד", "01/03/2026"], "2026-03-01"),                          # 3-א: no הנדון → up to רקע
+])
+def test_document_date(tmp_path, top, expected):
+    parsed = _parse(_family_a(tmp_path, top))
+    assert parsed["header"]["date"] == expected
+    assert parsed["warnings"] == []
+
+
+def test_date_after_subject_line_is_not_the_document_date(tmp_path):    # 3-א, 8b
+    with pytest.raises(ParseBlocked, match="לא נמצא תאריך מסמך"):
+        _parse(_family_a(tmp_path, ["הנדון: סיכום אבחון", "01/03/2026"]))
+
+
+def test_day_past_month_end_is_last_day_with_warning(tmp_path):        # item 10
+    parsed = _parse(_family_a(tmp_path, ["31/11/2025", "הנדון: סיכום אבחון"]))
+    assert parsed["header"]["date"] == "2025-11-30"
+    assert parsed["warnings"] == ["התאריך '31/11/2025' לא קיים — נשמר כ-30/11/2025, כדאי לבדוק"]
+
+
+def test_future_document_date_is_stored_with_warning(tmp_path):        # 3-ב
+    parsed = _parse(_family_a(tmp_path, ["01/01/2099", "הנדון: סיכום אבחון"]))
+    assert parsed["header"]["date"] == "2099-01-01"
+    assert parsed["warnings"] == ["התאריך '01/01/2099' עתידי — כדאי לבדוק"]
+
+
+@pytest.mark.parametrize("written", ["13/13/2025", "20/05"])           # 3-ג
+def test_impossible_or_yearless_document_date_blocks(tmp_path, written):
+    with pytest.raises(DateError):
+        _parse(_family_a(tmp_path, [written, "הנדון: סיכום אבחון"]))
+
+
+@pytest.mark.parametrize("line, expected", [                           # item 9, 3-ה
+    ("ת.ל.: 08/08/2008", "08/08/2008"),
+    ("ת.ל: 08/08/2008", "08/08/2008"),
+    ("ת.ל. : 08/08/2008", "08/08/2008"),
+    ("ת.ל :08/08/2008", "08/08/2008"),
+    ("ת.ל. 08/08/2008  ת.ז.: 000", None),       # no colon after ת.ל — never takes the ID
+])
+def test_date_of_birth_label_variants(tmp_path, line, expected):
+    parsed = _parse(_family_a(tmp_path, ["01/03/2026", line]))
+    assert parsed["header"]["date_of_birth"] == expected
+
+
+def test_missing_date_is_reported_as_blocked(tmp_path, monkeypatch):    # 3-ד, W2
+    patient = tmp_path / _PATIENT
+    patient.mkdir()
+    write_docx(patient / f"סיכום אבחון {_PATIENT}.docx",
+               ['בס"ד', "הנדון: סיכום אבחון", "רקע:", "ילד בן שש."])
+    monkeypatch.setattr(pipeline, "load_ner_model", lambda models_dir: None)
+    config = SimpleNamespace(models_dir="", run_mode="test", data_dir=str(tmp_path))
+
+    [(_, result)] = asyncio.run(pipeline.run_ingestion(
+        [str(tmp_path)], config, {}, None, None, dry_run=True))
+
+    assert result.status == "blocked"
+    assert result.message.startswith("לא נמצא תאריך מסמך")

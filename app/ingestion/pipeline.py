@@ -64,7 +64,8 @@ from app.storage.pinecone_client import delete_vectors, get_cohere_embedding, up
 from app.ingestion.adapter_a import parse_family_a
 from app.ingestion.classify import TYPE_LABELS, classify_filename
 from app.ingestion.adapter_b import parse_treatment_plan
-from app.ingestion.result import IngestResult
+from app.ingestion.dates import DateError
+from app.ingestion.result import IngestResult, ParseBlocked
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,9 @@ class IngestionWorkflow(Workflow):
             else:
                 parsed_data = parse_family_a(file_path, patient_folder_name, template_type)
 
+        except (ParseBlocked, DateError) as exc:
+            logger.warning("parse_step: blocked %s: %s", file_path, exc)
+            return StopEvent(result=IngestResult("blocked", str(exc)))
         except Exception:
             logger.exception("parse_step: parsing failed for %s", file_path)
             return StopEvent(result=IngestResult(

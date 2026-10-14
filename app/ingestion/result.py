@@ -17,6 +17,13 @@ class IngestResult:
     counts: dict[str, int] = field(default_factory=dict) # dry run only: sections/domains/goals/sessions
 
 
+class ParseBlocked(Exception):
+    """Raised by an adapter for a document that must not be loaded.
+
+    str(exc) is the Hebrew message shown in the load report.
+    """
+
+
 def format_report(results: list[tuple[str, IngestResult]]) -> str:
     """Render the load report: summary line, then one line per file (+ indented ⚠ lines)."""
     counts = {s: 0 for s in ("ok", "skipped", "ignored", "blocked", "error")}
