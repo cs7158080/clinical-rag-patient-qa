@@ -5,7 +5,7 @@ Parses .docx files with a fixed section structure and extracts:
 - Header fields (name, date, date_of_birth, national_id, hmo_name);
   the document date is found by find_document_date
 - Section text (one entry per fixed section key)
-- Domain findings (diagnosis only, from the ממצאי האבחון section)
+- Domain findings (both types, from the ממצאי and מהלך sections)
 """
 
 import logging
@@ -47,6 +47,10 @@ TREATMENT_SECTION_HEADERS: dict[str, str] = {
 
 # Mapping from header text → section key (recognises both heading sets)
 HEADER_TO_KEY: dict[str, str] = dict(zip(SECTION_HEADERS, SECTION_KEYS)) | TREATMENT_SECTION_HEADERS
+
+# Sections whose lines may be domain headings: ממצאי (diagnosis template) and
+# מהלך (summary template writes the domains there) — never רקע / סיכום (item 13).
+_DOMAIN_SECTIONS = ("מהלך_האבחון", "ממצאי_האבחון")
 
 # 13 domain sub-headers inside ממצאי האבחון (diagnosis only)
 DOMAIN_HEADERS = [
@@ -219,7 +223,7 @@ def parse_family_a(
         "patient_folder_name": str,
         "header": dict,           # from extract_header_fields
         "sections": dict,         # section_key -> concatenated paragraph text
-        "domains": dict,          # domain_name -> text (diagnosis only, else {})
+        "domains": dict,          # domain_name -> text (from ממצאי / מהלך sections)
         "file_path": str,
         "warnings": list[str],    # Hebrew, shown in the load report
     }
@@ -268,8 +272,8 @@ def parse_family_a(
             blocked = False  # new section resets the blocked flag
             continue
 
-        # --- Domain header detection (inside ממצאי_האבחון) ---
-        if current_section_key == "ממצאי_האבחון":
+        # --- Domain header detection (inside מהלך_* and ממצאי_*, item 13) ---
+        if current_section_key in _DOMAIN_SECTIONS:
             matched_domain = None
 
             for domain in DOMAIN_HEADERS:

@@ -102,3 +102,19 @@ def test_missing_date_is_reported_as_blocked(tmp_path, monkeypatch):    # 3-ד, 
 
     assert result.status == "blocked"
     assert result.message.startswith("לא נמצא תאריך מסמך")
+
+
+def test_domains_under_course_section(tmp_path):                       # item 13
+    path = write_docx(tmp_path / f"סיכום טיפול {_PATIENT}.docx", [
+        'בס"ד', "01/03/2026", "הנדון: סיכום טיפול",
+        "רקע:", "ילד בן שש.",
+        "מהלך הטיפול:", "להלן תפקודו בתחומים בהם עסק הטיפול:",
+        "הבנת שפה – הבנה תקינה.", "שטף - תקין",
+        "סיכום והמלצות:", "שטף טוב, מומלץ המשך מעקב.",
+    ])
+
+    parsed = parse_family_a(str(path), _PATIENT, "clinic_visit_summary")
+
+    assert parsed["sections"]["מהלך_האבחון"] == "להלן תפקודו בתחומים בהם עסק הטיפול:"
+    assert parsed["domains"] == {"הבנת שפה": "הבנה תקינה.", "שטף": "תקין"}
+    assert parsed["sections"]["סיכום_והמלצות"] == "שטף טוב, מומלץ המשך מעקב."
