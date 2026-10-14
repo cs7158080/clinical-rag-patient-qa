@@ -333,11 +333,17 @@ def parse_family_a(
         sections[key] = "\n".join(section_texts).strip()
 
     # Assemble domain texts (both Family A types).
-    # Parent-only categories are section headers, not domains — skipped entirely.
+    # Parent-only categories are headers above their sub-domains — skipped when
+    # empty. With text of their own they are stored as a child of themselves, so
+    # the parent lookup in retrieval returns them too (T1 5-ו).
+    parent_domains = dict(PARENT_DOMAINS)
     for domain_name, lines in domain_lines.items():
+        text = "\n".join(lines).strip()
         if domain_name in PARENT_ONLY_DOMAINS:
-            continue
-        domains[domain_name] = "\n".join(lines).strip()
+            if not text:
+                continue
+            parent_domains[domain_name] = domain_name
+        domains[domain_name] = text
 
     logger.info(
         "parse_family_a: parsed %s (%s) — sections=%d domains=%d",
@@ -353,7 +359,7 @@ def parse_family_a(
         "header": header,
         "sections": sections,
         "domains": domains,
-        "parent_domains": PARENT_DOMAINS,
+        "parent_domains": parent_domains,
         "file_path": file_path,
         "warnings": resolved.warnings,
     }

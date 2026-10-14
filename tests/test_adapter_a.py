@@ -152,3 +152,25 @@ def test_domain_name_must_be_a_whole_word(tmp_path):                   # 5-ב
 def test_play_reaches_chat_routing_and_extraction_prompt():            # 5-ג, 5-ד
     assert "משחק" in FIXED_DOMAINS and len(FIXED_DOMAINS) == 14
     assert "- משחק" in format_extraction_prompt("2026-10-14")
+
+
+def test_parent_domain_with_own_text_is_its_own_child(tmp_path):      # 5-ו
+    path = write_docx(tmp_path / f"סיכום טיפול {_PATIENT}.docx", [
+        'בס"ד', "01/03/2026", "מהלך הטיפול:",
+        "הבעת שפה - משתמש במבעים חד-מיליים.",      # parent heading with its own text
+        "שטף - תקין",
+    ])
+    parsed = parse_family_a(str(path), _PATIENT, "clinic_visit_summary")
+
+    assert parsed["domains"] == {"הבעת שפה": "משתמש במבעים חד-מיליים.", "שטף": "תקין"}
+    assert parsed["parent_domains"]["הבעת שפה"] == "הבעת שפה"
+
+
+def test_empty_parent_heading_is_not_stored(tmp_path):                 # unchanged behaviour
+    path = write_docx(tmp_path / f"סיכום אבחון {_PATIENT}.docx", [
+        'בס"ד', "01/03/2026", "ממצאי האבחון:", "הבעת שפה:", "תחביר – משפטים פשוטים.",
+    ])
+    parsed = _parse(str(path))
+
+    assert parsed["domains"] == {"תחביר": "משפטים פשוטים."}
+    assert "הבעת שפה" not in parsed["parent_domains"]
