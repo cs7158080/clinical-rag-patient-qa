@@ -189,7 +189,9 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
                 submit_btn = gr.Button("שלח", variant="primary")
                 answer_output = gr.Markdown()
 
-            with gr.TabItem("📝 יצירת סיכום ביקור"):
+            # Hidden for now (client priority; code kept). Before showing it again,
+            # fix the date line in docx_builder — PLAN.md real-data T1 decision 3-ו.
+            with gr.TabItem("📝 יצירת סיכום ביקור", visible=False):
                 initial_dates = get_session_dates(initial_patients[0][1] if initial_patients else None)
                 with gr.Row():
                     date_from_dropdown = gr.Dropdown(
