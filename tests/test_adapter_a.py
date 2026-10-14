@@ -106,6 +106,28 @@ def test_missing_date_is_reported_as_blocked(tmp_path, monkeypatch):    # 3-ד, 
     assert result.message.startswith("לא נמצא תאריך מסמך")
 
 
+def test_dry_run_reports_document_date_and_non_empty_counts(tmp_path, monkeypatch):  # 6-א, 6-ב
+    from app.deidentification import validation
+
+    patient = tmp_path / _PATIENT
+    patient.mkdir()
+    write_docx(patient / f"סיכום אבחון {_PATIENT}.docx", [
+        'בס"ד', "01/03/2026", "הנדון: סיכום אבחון", "רקע:", "ילד בן שש.",
+        "ממצאי האבחון:", "תחביר – משפטים פשוטים.", "שטף -",          # שטף empty
+    ])
+    monkeypatch.setattr(pipeline, "load_ner_model", lambda models_dir: None)
+    monkeypatch.setattr(validation, "_check_ner_rescan", lambda text: True)
+    config = SimpleNamespace(models_dir="", run_mode="test", data_dir=str(tmp_path))
+
+    [(_, result)] = asyncio.run(pipeline.run_ingestion(
+        [str(tmp_path)], config, {}, None, None, dry_run=True))
+
+    assert result.status == "ok", result.message
+    assert result.document_date == "2026-03-01"
+    assert result.counts["sections"] == 1        # רקע only
+    assert result.counts["domains"] == 1         # תחביר; empty שטף not counted
+
+
 def test_domains_under_course_section(tmp_path):                       # item 13
     path = write_docx(tmp_path / f"סיכום טיפול {_PATIENT}.docx", [
         'בס"ד', "01/03/2026", "הנדון: סיכום טיפול",

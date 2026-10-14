@@ -366,15 +366,18 @@ class IngestionWorkflow(Workflow):
         """Route de-identified data to the correct storage branch (dry run: stop here)."""
         if self._dry_run:
             data = ev.parsed_data
+            is_family_a = ev.template_type in ("diagnosis", "clinic_visit_summary")
             return StopEvent(result=IngestResult(
                 "ok",
                 warnings=data.get("warnings", []),
                 counts={
-                    "sections": len(data.get("sections", {})),
-                    "domains": len(data.get("domains", {})),
+                    # non-empty only — what reaches the LLM (T1 6-ב)
+                    "sections": sum(1 for t in data.get("sections", {}).values() if t),
+                    "domains": sum(1 for t in data.get("domains", {}).values() if t),
                     "goals": len(data.get("goals_rows", [])),
                     "sessions": len(data.get("session_blocks", [])),
                 },
+                document_date=data["header"]["date"] if is_family_a else "",
             ))
         if ev.template_type in ("diagnosis", "clinic_visit_summary"):
             return FamilyAStoreEvent(parsed_data=ev.parsed_data)

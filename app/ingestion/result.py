@@ -15,6 +15,7 @@ class IngestResult:
     message: str = ""                                    # Hebrew; empty for ok / skipped
     warnings: list[str] = field(default_factory=list)    # Hebrew; one ⚠ line each in the report
     counts: dict[str, int] = field(default_factory=dict) # dry run only: sections/domains/goals/sessions
+    document_date: str = ""                              # dry run only, Family A: ISO date read
 
 
 class ParseBlocked(Exception):
