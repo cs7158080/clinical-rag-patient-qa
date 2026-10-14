@@ -52,10 +52,12 @@ HEADER_TO_KEY: dict[str, str] = dict(zip(SECTION_HEADERS, SECTION_KEYS)) | TREAT
 # מהלך (summary template writes the domains there) — never רקע / סיכום (item 13).
 _DOMAIN_SECTIONS = ("מהלך_האבחון", "ממצאי_האבחון")
 
-# 13 domain sub-headers inside ממצאי האבחון (diagnosis only)
+# The 14 domains (both Family A types). Single source — FIXED_DOMAINS in
+# router.py is derived from it (T1 5-ד). משחק added in T1 (item 14).
 DOMAIN_HEADERS = [
     "פרגמטיקה ותקשורת",
     "הבנת שפה",
+    "משחק",
     "הבעת שפה",
     "לקסיקון",
     "תחביר",
@@ -80,6 +82,35 @@ PARENT_DOMAINS: dict[str, str] = {
 # Parent-only categories: headers above their child domains — never stored
 # as findings rows of their own. Derived from PARENT_DOMAINS.
 PARENT_ONLY_DOMAINS: set[str] = set(PARENT_DOMAINS.values())
+
+# Other heading names the corpus uses for the same domain (item 14).
+DOMAIN_SYNONYMS: dict[str, str] = {
+    "שטף וקול": "שטף",
+    "שטף, קול": "שטף",
+    "לקסיקון ושליפה": "לקסיקון",
+    "אוצר מילים": "לקסיקון",
+    "מובנות דיבור ויכולות אורומוטוריות": "מובנות הדיבור",
+}
+
+# Every heading name -> its domain, longest first so 'שטף וקול' wins over 'שטף' (5-א).
+_DOMAIN_NAMES: list[tuple[str, str]] = sorted(
+    [(d, d) for d in DOMAIN_HEADERS] + list(DOMAIN_SYNONYMS.items()),
+    key=lambda pair: len(pair[0]),
+    reverse=True,
+)
+
+
+def _match_domain(line: str) -> Optional[tuple[str, str]]:
+    """(domain, text after the heading) when *line* is a domain heading, else None.
+
+    Whole word only (5-ב): the name is followed by end of line, whitespace,
+    ':' or a dash — 'תחבירית…' is not the 'תחביר' heading.
+    """
+    for name, domain in _DOMAIN_NAMES:
+        match = re.match(rf"{re.escape(name)}(?=$|[\s:\-–])\s*[:\-–]?\s*(.*)$", line)
+        if match:
+            return domain, match.group(1).strip()
+    return None
 
 # Signature-block sentinel — clinician licence number indicator
 _SIGNATURE_SENTINEL = "מ.ר."
@@ -274,29 +305,20 @@ def parse_family_a(
 
         # --- Domain header detection (inside מהלך_* and ממצאי_*, item 13) ---
         if current_section_key in _DOMAIN_SECTIONS:
-            matched_domain = None
-
-            for domain in DOMAIN_HEADERS:
-                pattern = rf"^{re.escape(domain)}\s*[:\-–]?\s*(.*)$"
-                match = re.match(pattern, stripped)
-
-                if match:
-                    matched_domain = domain
-                    current_domain = domain
-                    domain_lines.setdefault(domain, [])
-
-                    inline_text = match.group(1).strip()
-                    if inline_text:
-                        domain_lines[domain].append(inline_text)
-                    break
-
-            if matched_domain is not None:
+            matched = _match_domain(stripped)
+            if matched is not None:
+                current_domain, inline_text = matched
+                domain_lines.setdefault(current_domain, [])
+                if inline_text:
+                    domain_lines[current_domain].append(inline_text)
                 continue
 
         # --- Content collection ---
         if blocked:
             continue
 
+        # Lines before the first section heading — e.g. therapist notes
+        # 'לדבר על :' / 'להדרכה:' before רקע — are ignored on purpose (PLAN.md 14b).
         if current_section_key is not None:
             if current_domain is not None:
                 # Collect into the current domain

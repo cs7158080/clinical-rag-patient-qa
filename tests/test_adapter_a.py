@@ -9,6 +9,8 @@ from app.ingestion import pipeline
 from app.ingestion.adapter_a import parse_family_a
 from app.ingestion.dates import DateError
 from app.ingestion.result import ParseBlocked
+from app.prompts.extraction import format_extraction_prompt
+from app.query.router import FIXED_DOMAINS
 from tests.fixtures.docx_factory import write_docx
 
 _PATIENT = "ישראל ישראלי"
@@ -118,3 +120,35 @@ def test_domains_under_course_section(tmp_path):                       # item 13
     assert parsed["sections"]["מהלך_האבחון"] == "להלן תפקודו בתחומים בהם עסק הטיפול:"
     assert parsed["domains"] == {"הבנת שפה": "הבנה תקינה.", "שטף": "תקין"}
     assert parsed["sections"]["סיכום_והמלצות"] == "שטף טוב, מומלץ המשך מעקב."
+
+
+def test_domain_synonyms_and_play(tmp_path):                           # item 14, 5-א, 5-ג
+    path = write_docx(tmp_path / f"סיכום אבחון {_PATIENT}.docx", [
+        'בס"ד', "01/03/2026", "ממצאי האבחון:",
+        "שטף, קול - תקין",
+        "משחק\nנצפה משחק סימבולי קצר.",
+        "אוצר מילים – אוצר מילים דל.",
+        "לקסיקון ושליפה:\nקשיי שליפה.",
+        "מובנות דיבור ויכולות אורומוטוריות:\nמובנות טובה.",
+    ])
+
+    assert _parse(str(path))["domains"] == {
+        "שטף": "תקין",
+        "משחק": "נצפה משחק סימבולי קצר.",
+        "לקסיקון": "אוצר מילים דל.\nקשיי שליפה.",      # two synonyms, one domain
+        "מובנות הדיבור": "מובנות טובה.",
+    }
+
+
+def test_domain_name_must_be_a_whole_word(tmp_path):                   # 5-ב
+    path = write_docx(tmp_path / f"סיכום אבחון {_PATIENT}.docx", [
+        'בס"ד', "01/03/2026", "ממצאי האבחון:",
+        "תחביר – משפטים פשוטים.", "תחבירית נשמעו שיבושים.",
+    ])
+
+    assert _parse(str(path))["domains"] == {"תחביר": "משפטים פשוטים.\nתחבירית נשמעו שיבושים."}
+
+
+def test_play_reaches_chat_routing_and_extraction_prompt():            # 5-ג, 5-ד
+    assert "משחק" in FIXED_DOMAINS and len(FIXED_DOMAINS) == 14
+    assert "- משחק" in format_extraction_prompt("2026-10-14")
