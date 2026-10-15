@@ -12,9 +12,17 @@ Status = Literal["ok", "skipped", "ignored", "blocked", "error"]
 @dataclass
 class IngestResult:
     status: Status
-    message: str = ""                                    # Hebrew; empty for ok / skipped / ignored
+    message: str = ""                                    # Hebrew; empty for ok / skipped
     warnings: list[str] = field(default_factory=list)    # Hebrew; one ⚠ line each in the report
     counts: dict[str, int] = field(default_factory=dict) # dry run only: sections/domains/goals/sessions
+    document_date: str = ""                              # dry run only, Family A: ISO date read
+
+
+class ParseBlocked(Exception):
+    """Raised by an adapter for a document that must not be loaded.
+
+    str(exc) is the Hebrew message shown in the load report.
+    """
 
 
 def format_report(results: list[tuple[str, IngestResult]]) -> str:
@@ -31,7 +39,7 @@ def format_report(results: list[tuple[str, IngestResult]]) -> str:
         elif r.status == "skipped":
             lines.append(f"○  {name} (ללא שינוי)")
         elif r.status == "ignored":
-            lines.append(f"○  {name} (דולג — לא מסמך קליני)")
+            lines.append(f"○  {name} — דולג: {r.message}")
         elif r.status == "blocked":
             lines.append(f"✗  {name} — חסום: {r.message}")
         else:
@@ -41,6 +49,6 @@ def format_report(results: list[tuple[str, IngestResult]]) -> str:
     summary = (
         f"סיום טעינה — {counts['ok']} נטענו, {counts['skipped']} ללא שינוי, "
         f"{counts['blocked']} חסומים, {counts['error']} שגיאות, "
-        f"{counts['ignored']} דולגו (לא מסמך קליני), {n_warnings} אזהרות"
+        f"{counts['ignored']} דולגו (לא זוהו כמסמך קליני), {n_warnings} אזהרות"
     )
     return summary + "\n\n" + "\n".join(lines)

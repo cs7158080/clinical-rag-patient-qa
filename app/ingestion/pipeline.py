@@ -3,7 +3,7 @@ pipeline.py — LlamaIndex Workflow for clinical document ingestion.
 
 Workflow steps
 --------------
-parse_step         : Detect template type, check file hash, parse document.
+parse_step         : Classify by filename, check file hash, parse document.
 deidentify_step    : Validate name variants, de-identify all text fields, run Pass 2 gate.
 blocked_step       : Log blocked files and emit StopEvent.
 route_step         : Route de-identified data to the correct storage branch.
@@ -61,9 +61,11 @@ from app.storage.models import (
     TreatmentSessionChunk,
 )
 from app.storage.pinecone_client import delete_vectors, get_cohere_embedding, upsert_vectors
-from app.ingestion.adapter_a import detect_template_type, parse_family_a
+from app.ingestion.adapter_a import parse_family_a
+from app.ingestion.classify import TYPE_LABELS, classify_filename
 from app.ingestion.adapter_b import parse_treatment_plan
-from app.ingestion.result import IngestResult
+from app.ingestion.dates import DateError
+from app.ingestion.result import IngestResult, ParseBlocked
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +97,10 @@ class BlockedEvent(Event):
 # Hebrew UI messages. Generic on purpose: the found value goes to the log only
 # (written by the Pass 2 checks in validation.py).
 _UNKNOWN_TYPE_MSG = (
-    "סוג המסמך לא זוהה משם הקובץ — שם הקובץ צריך להתחיל ב'סיכום אבחון', "
-    "'סיכום טיפול' או 'תוכנית טיפול'"
+    "לא זוהה כמסמך קליני ולא נטען. אם זה אבחון, סיכום טיפול או תוכנית טיפול — "
+    "יש לכלול זאת בשם הקובץ"
 )
+_CONFLICTING_TYPE_MSG = "שם הקובץ מתאים לכמה סוגי מסמכים ({labels}) — יש להשאיר בשם רק את הסוג הנכון"
 _PRIVACY_SUFFIX = " — הקובץ לא נטען כדי להגן על הפרטיות"
 _VALIDATION_MESSAGES = {
     "regex": "נמצא בטקסט פרט מזהה (ת.ז. / טלפון / דוא\"ל) שלא הוסר" + _PRIVACY_SUFFIX,
@@ -155,6 +158,21 @@ class IngestionWorkflow(Workflow):
     ) -> Union[ParsedEvent, StopEvent]:
         """Read the file, check its hash, detect template type, and parse."""
         file_path = ev.file_path
+        filename = os.path.basename(file_path)
+        patient_folder_name = os.path.basename(os.path.dirname(file_path))
+
+        # Document type from the filename only (PLAN.md 3-X) — before reading,
+        # so an unrecognised file is never opened.
+        matched = classify_filename(filename)
+        if not matched:
+            logger.info("parse_step: not a recognised document type, ignored: %s", file_path)
+            return StopEvent(result=IngestResult("ignored", _UNKNOWN_TYPE_MSG))
+        if len(matched) > 1:
+            logger.warning("parse_step: filename matches several types %s: %s", matched, file_path)
+            labels = ", ".join(TYPE_LABELS[t] for t in matched)
+            return StopEvent(result=IngestResult(
+                "blocked", _CONFLICTING_TYPE_MSG.format(labels=labels)))
+        [template_type] = matched
 
         # Hash check
         try:
@@ -170,27 +188,15 @@ class IngestionWorkflow(Workflow):
             logger.info("parse_step: skipping unchanged file: %s", file_path)
             return StopEvent(result=IngestResult("skipped"))
 
-        # Detect template type from filename
-        filename = os.path.basename(file_path)
-        patient_folder_name = os.path.basename(os.path.dirname(file_path))
-
         try:
-            if filename.startswith("סיכום אבחון") or filename.startswith("סיכום טיפול"):
-                template_type = detect_template_type(filename)
-                if template_type is None:
-                    logger.warning("parse_step: unknown Family A template for: %s", file_path)
-                    return StopEvent(result=IngestResult("blocked", _UNKNOWN_TYPE_MSG))
+            if template_type == "treatment_plan":
+                parsed_data = parse_treatment_plan(file_path, patient_folder_name)
+            else:
                 parsed_data = parse_family_a(file_path, patient_folder_name, template_type)
 
-
-            elif filename.startswith("תוכנית טיפול"):
-                template_type = "treatment_plan"
-                parsed_data = parse_treatment_plan(file_path, patient_folder_name)
-
-            else:
-                logger.warning("parse_step: unknown template type for file: %s", file_path)
-                return StopEvent(result=IngestResult("blocked", _UNKNOWN_TYPE_MSG))
-
+        except (ParseBlocked, DateError) as exc:
+            logger.warning("parse_step: blocked %s: %s", file_path, exc)
+            return StopEvent(result=IngestResult("blocked", str(exc)))
         except Exception:
             logger.exception("parse_step: parsing failed for %s", file_path)
             return StopEvent(result=IngestResult(
@@ -360,15 +366,18 @@ class IngestionWorkflow(Workflow):
         """Route de-identified data to the correct storage branch (dry run: stop here)."""
         if self._dry_run:
             data = ev.parsed_data
+            is_family_a = ev.template_type in ("diagnosis", "clinic_visit_summary")
             return StopEvent(result=IngestResult(
                 "ok",
                 warnings=data.get("warnings", []),
                 counts={
-                    "sections": len(data.get("sections", {})),
-                    "domains": len(data.get("domains", {})),
+                    # non-empty only — what reaches the LLM (T1 6-ב)
+                    "sections": sum(1 for t in data.get("sections", {}).values() if t),
+                    "domains": sum(1 for t in data.get("domains", {}).values() if t),
                     "goals": len(data.get("goals_rows", [])),
                     "sessions": len(data.get("session_blocks", [])),
                 },
+                document_date=data["header"]["date"] if is_family_a else "",
             ))
         if ev.template_type in ("diagnosis", "clinic_visit_summary"):
             return FamilyAStoreEvent(parsed_data=ev.parsed_data)

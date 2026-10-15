@@ -15,16 +15,16 @@ def test_report_all_statuses():
     report = format_report([
         ("/p/a/ok.docx", IngestResult("ok", warnings=[_WARNING])),
         ("/p/a/same.docx", IngestResult("skipped")),
-        ("/p/a/חוזה.docx", IngestResult("ignored")),
+        ("/p/a/חוזה.docx", IngestResult("ignored", "לא זוהה כמסמך קליני ולא נטען")),
         ("/p/a/blk.docx", IngestResult("blocked", "לא נמצא תאריך מסמך")),
         ("/p/a/err.docx", IngestResult("error", "שגיאה לא צפויה")),
     ])
     lines = report.splitlines()
     assert lines[0] == ("סיום טעינה — 1 נטענו, 1 ללא שינוי, 1 חסומים, 1 שגיאות, "
-                        "1 דולגו (לא מסמך קליני), 1 אזהרות")
+                        "1 דולגו (לא זוהו כמסמך קליני), 1 אזהרות")
     assert lines.index(f"      ⚠  {_WARNING}") == lines.index("✓  ok.docx") + 1
     assert "○  same.docx (ללא שינוי)" in lines
-    assert "○  חוזה.docx (דולג — לא מסמך קליני)" in lines
+    assert "○  חוזה.docx — דולג: לא זוהה כמסמך קליני ולא נטען" in lines
     assert "✗  blk.docx — חסום: לא נמצא תאריך מסמך" in lines
     assert "✗  err.docx — שגיאה: שגיאה לא צפויה" in lines
 

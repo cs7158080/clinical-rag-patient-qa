@@ -16,27 +16,14 @@ Strategies:
 
 from dataclasses import dataclass
 
+from app.ingestion.adapter_a import DOMAIN_HEADERS
 from app.storage.models import QueryParams
 
 # ---------------------------------------------------------------------------
-# Fixed clinical domain taxonomy (13 domains from Step 1)
+# Fixed clinical domain taxonomy — the 14 domains, one source with the parser
 # ---------------------------------------------------------------------------
 
-FIXED_DOMAINS = {
-    'פרגמטיקה ותקשורת',
-    'הבנת שפה',
-    'הבעת שפה',
-    'לקסיקון',
-    'תחביר',
-    'מורפולוגיה',
-    'התארגנות להבעת מלל מורכב',
-    'מובנות הדיבור',
-    'מודעות פונולוגית',
-    'זיכרון שמיעתי',
-    'אורל מוטור',
-    'אכילה',
-    'שטף',
-}
+FIXED_DOMAINS: set[str] = set(DOMAIN_HEADERS)
 
 
 # ---------------------------------------------------------------------------

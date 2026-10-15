@@ -2,14 +2,18 @@
 adapter_a.py — Family A parser for diagnosis and clinic_visit_summary documents.
 
 Parses .docx files with a fixed section structure and extracts:
-- Header fields (name, date, date_of_birth, national_id, hmo_name)
+- Header fields (name, date, date_of_birth, national_id, hmo_name);
+  the document date is found by find_document_date
 - Section text (one entry per fixed section key)
-- Domain findings (diagnosis only, from the ממצאי האבחון section)
+- Domain findings (both types, from the ממצאי and מהלך sections)
 """
 
 import logging
 import re
 from typing import Optional
+
+from app.ingestion.dates import ParsedDate, parse_date, resolve_dates
+from app.ingestion.result import ParseBlocked
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +48,16 @@ TREATMENT_SECTION_HEADERS: dict[str, str] = {
 # Mapping from header text → section key (recognises both heading sets)
 HEADER_TO_KEY: dict[str, str] = dict(zip(SECTION_HEADERS, SECTION_KEYS)) | TREATMENT_SECTION_HEADERS
 
-# 13 domain sub-headers inside ממצאי האבחון (diagnosis only)
+# Sections whose lines may be domain headings: ממצאי (diagnosis template) and
+# מהלך (summary template writes the domains there) — never רקע / סיכום (item 13).
+_DOMAIN_SECTIONS = ("מהלך_האבחון", "ממצאי_האבחון")
+
+# The 14 domains (both Family A types). Single source — FIXED_DOMAINS in
+# router.py is derived from it (T1 5-ד). משחק added in T1 (item 14).
 DOMAIN_HEADERS = [
     "פרגמטיקה ותקשורת",
     "הבנת שפה",
+    "משחק",
     "הבעת שפה",
     "לקסיקון",
     "תחביר",
@@ -73,38 +83,57 @@ PARENT_DOMAINS: dict[str, str] = {
 # as findings rows of their own. Derived from PARENT_DOMAINS.
 PARENT_ONLY_DOMAINS: set[str] = set(PARENT_DOMAINS.values())
 
+# Other heading names the corpus uses for the same domain (item 14).
+DOMAIN_SYNONYMS: dict[str, str] = {
+    "שטף וקול": "שטף",
+    "שטף, קול": "שטף",
+    "לקסיקון ושליפה": "לקסיקון",
+    "אוצר מילים": "לקסיקון",
+    "מובנות דיבור ויכולות אורומוטוריות": "מובנות הדיבור",
+}
+
+# Every heading name -> its domain, longest first so 'שטף וקול' wins over 'שטף' (5-א).
+_DOMAIN_NAMES: list[tuple[str, str]] = sorted(
+    [(d, d) for d in DOMAIN_HEADERS] + list(DOMAIN_SYNONYMS.items()),
+    key=lambda pair: len(pair[0]),
+    reverse=True,
+)
+
+
+def _match_domain(line: str) -> Optional[tuple[str, str]]:
+    """(domain, text after the heading) when *line* is a domain heading, else None.
+
+    Whole word only (5-ב): the name is followed by end of line, whitespace,
+    ':' or a dash — 'תחבירית…' is not the 'תחביר' heading.
+    """
+    for name, domain in _DOMAIN_NAMES:
+        match = re.match(rf"{re.escape(name)}(?=$|[\s:\-–])\s*[:\-–]?\s*(.*)$", line)
+        if match:
+            return domain, match.group(1).strip()
+    return None
+
 # Signature-block sentinel — clinician licence number indicator
 _SIGNATURE_SENTINEL = "מ.ר."
 
 
 # ---------------------------------------------------------------------------
-# Template type detection
-# ---------------------------------------------------------------------------
-
-def detect_template_type(filename: str) -> Optional[str]:
-    """Detect the Family A template type from the document filename.
-
-    Parameters
-    ----------
-    filename:
-        The basename of the .docx file (with or without extension).
-
-    Returns
-    -------
-    'diagnosis' if the filename starts with 'סיכום אבחון',
-    'clinic_visit_summary' if it starts with 'סיכום טיפול',
-    None otherwise.
-    """
-    if filename.startswith("סיכום אבחון"):
-        return "diagnosis"
-    if filename.startswith("סיכום טיפול"):
-        return "clinic_visit_summary"
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Header field extraction
 # ---------------------------------------------------------------------------
+
+def _lines(paragraphs) -> list[str]:
+    """Every non-empty line of *paragraphs*, stripped (PLAN.md item 11).
+
+    A Shift+Enter line break inside a paragraph comes through python-docx as
+    '\\n'. Heading and content often share one paragraph that way, so each
+    line is handled as a paragraph of its own.
+    """
+    return [
+        line.strip()
+        for para in paragraphs
+        for line in para.text.split("\n")
+        if line.strip()
+    ]
+
 
 def extract_header_fields(doc) -> dict:
     """Scan the first ~10 paragraphs of *doc* for known header field patterns.
@@ -112,8 +141,8 @@ def extract_header_fields(doc) -> dict:
     Fields extracted
     ----------------
     name           : text after 'שם:' or 'שם '
-    date           : text after 'תאריך:'
-    date_of_birth  : text after 'ת.ל.:'
+    date           : always None here — set by parse_family_a (find_document_date)
+    date_of_birth  : text after 'ת.ל' + anything attached to it + ':' (item 9)
     national_id    : text after 'ת.ז.:'
     hmo_name       : text after 'קופת חולים:' / 'קופת חולים ' / 'HMO:'
 
@@ -139,17 +168,14 @@ def extract_header_fields(doc) -> dict:
     # Each regex captures the value in group 1.
     patterns = [
         ("name",          re.compile(r"שם\s*[:\s]\s*(.+)")),
-        ("date",          re.compile(r"תאריך\s*:\s*(.+)")),
-        ("date_of_birth", re.compile(r"ת\.ל\.\s*:\s*(.+)")),
+        # 'ת.ל:', 'ת.ל.:', 'ת.ל. :' … — never past a space into the next field (item 9)
+        ("date_of_birth", re.compile(r"ת\.ל[^\s:]*\s*:\s*(.+)")),
         ("national_id",   re.compile(r"ת\.ז\.\s*:\s*(.+)")),
         ("hmo_name",      re.compile(r"(?:קופת חולים|HMO)\s*[:\s]\s*(.+)", re.IGNORECASE)),
     ]
 
-    paragraphs = doc.paragraphs[:10]
-    for para in paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
+    # Header lives in the first 10 paragraphs; each may hold several lines (item 11).
+    for text in _lines(doc.paragraphs[:10]):
         for field_key, pattern in patterns:
             if result[field_key] is not None:
                 # Already found this field
@@ -161,6 +187,43 @@ def extract_header_fields(doc) -> dict:
                     result[field_key] = value
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Document date (PLAN.md items 8, 8b, 10; T1 decisions 3-א … 3-ג)
+# ---------------------------------------------------------------------------
+
+_DATE_LABEL_RE = re.compile(r"תאריך\s*:\s*(.+)")
+_SUBJECT_PREFIX = "הנדון"
+_NO_DATE_MSG = "לא נמצא תאריך מסמך — יש לכתוב את התאריך בשורה נפרדת לפני 'הנדון'"
+
+
+def _section_key(line: str) -> Optional[str]:
+    """Section key when *line* is a section heading, else None.
+
+    startswith() so a colon or text after the heading still matches.
+    """
+    for header_text, key in HEADER_TO_KEY.items():
+        if line.rstrip(':').startswith(header_text.rstrip(':')):
+            return key
+    return None
+
+
+def find_document_date(lines: list[str]) -> ParsedDate:
+    """The document date: the first line that is only a date, or 'תאריך: <date>'.
+
+    Searched from the top down to the 'הנדון' line or the first section heading,
+    whichever comes first — never in the body.
+    Raises ParseBlocked when there is none, DateError when it is impossible.
+    """
+    for line in lines:
+        if line.startswith(_SUBJECT_PREFIX) or _section_key(line) is not None:
+            break
+        label = _DATE_LABEL_RE.fullmatch(line)
+        parsed = parse_date(label.group(1) if label else line)
+        if parsed is not None:
+            return parsed
+    raise ParseBlocked(_NO_DATE_MSG)
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +254,9 @@ def parse_family_a(
         "patient_folder_name": str,
         "header": dict,           # from extract_header_fields
         "sections": dict,         # section_key -> concatenated paragraph text
-        "domains": dict,          # domain_name -> text (diagnosis only, else {})
+        "domains": dict,          # domain_name -> text (from ממצאי / מהלך sections)
         "file_path": str,
+        "warnings": list[str],    # Hebrew, shown in the load report
     }
     """
     from docx import Document  # type: ignore
@@ -203,7 +267,13 @@ def parse_family_a(
         logger.error("parse_family_a: failed to open document %s: %s", file_path, exc)
         raise
 
+    lines = _lines(doc.paragraphs)
     header = extract_header_fields(doc)
+
+    # One date, no treatment start: a day past month end → last day + warning,
+    # a future date → warning, no year → DateError (blocked).
+    resolved = resolve_dates([find_document_date(lines)])
+    header["date"] = resolved.dates[0].isoformat()
 
     # Initialise all sections with empty strings (missing sections are kept as "")
     sections: dict[str, str] = {key: "" for key in SECTION_KEYS}
@@ -215,14 +285,7 @@ def parse_family_a(
     domain_lines: dict[str, list[str]] = {}
     blocked: bool = False  # True once signature block sentinel is encountered
 
-    for para in doc.paragraphs:
-        raw_text = para.text
-        stripped = raw_text.strip()
-
-        # Empty paragraph — skip (but reset blocked flag per section only)
-        if not stripped:
-            continue
-
+    for stripped in lines:
         # --- Signature block sentinel ---
         # If the clinician licence marker or the closing salutation appears,
         # stop collecting for the current section.
@@ -233,44 +296,29 @@ def parse_family_a(
             continue
 
         # --- Section header detection ---
-        # Use startswith() to handle colons and whitespace variants
-        section_key = None
-        for section_header_text, key in HEADER_TO_KEY.items():
-            if stripped.rstrip(':').startswith(section_header_text.rstrip(':')):
-                section_key = key
-                break
-
+        section_key = _section_key(stripped)
         if section_key is not None:
             current_section_key = section_key
             current_domain = None
             blocked = False  # new section resets the blocked flag
             continue
 
-        # --- Domain header detection (inside ממצאי_האבחון) ---
-        if current_section_key == "ממצאי_האבחון":
-            matched_domain = None
-
-            for domain in DOMAIN_HEADERS:
-                pattern = rf"^{re.escape(domain)}\s*[:\-–]?\s*(.*)$"
-                match = re.match(pattern, stripped)
-
-                if match:
-                    matched_domain = domain
-                    current_domain = domain
-                    domain_lines.setdefault(domain, [])
-
-                    inline_text = match.group(1).strip()
-                    if inline_text:
-                        domain_lines[domain].append(inline_text)
-                    break
-
-            if matched_domain is not None:
+        # --- Domain header detection (inside מהלך_* and ממצאי_*, item 13) ---
+        if current_section_key in _DOMAIN_SECTIONS:
+            matched = _match_domain(stripped)
+            if matched is not None:
+                current_domain, inline_text = matched
+                domain_lines.setdefault(current_domain, [])
+                if inline_text:
+                    domain_lines[current_domain].append(inline_text)
                 continue
 
         # --- Content collection ---
         if blocked:
             continue
 
+        # Lines before the first section heading — e.g. therapist notes
+        # 'לדבר על :' / 'להדרכה:' before רקע — are ignored on purpose (PLAN.md 14b).
         if current_section_key is not None:
             if current_domain is not None:
                 # Collect into the current domain
@@ -285,11 +333,17 @@ def parse_family_a(
         sections[key] = "\n".join(section_texts).strip()
 
     # Assemble domain texts (both Family A types).
-    # Parent-only categories are section headers, not domains — skipped entirely.
+    # Parent-only categories are headers above their sub-domains — skipped when
+    # empty. With text of their own they are stored as a child of themselves, so
+    # the parent lookup in retrieval returns them too (T1 5-ו).
+    parent_domains = dict(PARENT_DOMAINS)
     for domain_name, lines in domain_lines.items():
+        text = "\n".join(lines).strip()
         if domain_name in PARENT_ONLY_DOMAINS:
-            continue
-        domains[domain_name] = "\n".join(lines).strip()
+            if not text:
+                continue
+            parent_domains[domain_name] = domain_name
+        domains[domain_name] = text
 
     logger.info(
         "parse_family_a: parsed %s (%s) — sections=%d domains=%d",
@@ -305,6 +359,7 @@ def parse_family_a(
         "header": header,
         "sections": sections,
         "domains": domains,
-        "parent_domains": PARENT_DOMAINS,
+        "parent_domains": parent_domains,
         "file_path": file_path,
+        "warnings": resolved.warnings,
     }

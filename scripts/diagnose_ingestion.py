@@ -56,6 +56,9 @@ def compare(result, expected) -> list[str]:
     for key, n in expected.get("counts", {}).items():
         if result.counts.get(key) != n:
             diffs.append(f"count {key}={result.counts.get(key)} != expected {n}")
+    want_date = expected.get("document_date")
+    if want_date is not None and result.document_date != want_date:
+        diffs.append(f"document_date {result.document_date!r} != expected {want_date!r}")
     return diffs
 
 
@@ -86,6 +89,8 @@ async def main(expected_path: str) -> None:
             print(f"         message: {result.message}")
         for w in result.warnings:
             print(f"         warning: {w}")
+        if result.document_date:
+            print(f"         date:    {result.document_date}")
         if result.counts:
             print("         counts:  " + ", ".join(f"{k}={v}" for k, v in result.counts.items()))
         for d in diffs:
