@@ -5,7 +5,7 @@ import pytest
 from app.ingestion.adapter_b import parse_treatment_plan
 from app.ingestion.dates import DateError
 from app.ingestion.result import ParseBlocked
-from tests.fixtures.docx_factory import write_docx
+from tests.fixtures.docx_factory import Table, write_docx
 
 _PATIENT = "ישראל ישראלי"
 
@@ -86,3 +86,90 @@ def test_start_date_that_is_not_a_full_date_blocks(tmp_path, written):
 def test_impossible_or_unresolvable_dates_block(tmp_path, start, session):
     with pytest.raises(DateError):
         _parse(_plan(tmp_path, start, [session, "מפגש."]))
+
+
+def test_goals_table_becomes_one_record_with_a_line_per_domain(tmp_path):   # 16, 2-ג
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        Table([
+            ["מטרות בתאריך 05/03/2026"],
+            ["קריאה ", "ידע אותיות"],
+            ["", "קוד קריאה\nצירופים"],      # blank domain = continuation; lines in a cell
+            ["", ""],                           # empty row skipped
+            ["מודעות פונולוגית", ""],          # domain without a goal
+        ]),
+        "05/03/2026", "מפגש.",
+    ]))
+
+    assert parsed["goals_rows"] == [{
+        "session_date": "2026-03-05",
+        "goals_text": "קריאה: ידע אותיות; קוד קריאה; צירופים\nמודעות פונולוגית",
+    }]
+    assert parsed["warnings"] == []
+
+
+def test_each_table_is_a_record_and_its_title_date_joins_the_sequence(tmp_path):  # 17, 2-ב, 1-א
+    parsed = _parse(_plan(tmp_path, "01/07/2026", [
+        Table([["מטרות בתאריך 20/07"], ["תחביר", "משפט פשוט"]]),     # no year → start's year
+        "03/08/2026", "מפגש.",
+        Table([["מטרות: בתאריך 2/8/26:"], ["תחביר", "משפט מורכב"]]),
+        "המשך המפגש.",                     # a table between sessions does not end the session
+        "12/08", "מפגש.",                  # no year → previous date (the table title)
+    ]))
+
+    assert parsed["goals_rows"] == [
+        {"session_date": "2026-07-20", "goals_text": "תחביר: משפט פשוט"},
+        {"session_date": "2026-08-02", "goals_text": "תחביר: משפט מורכב"},
+    ]
+    assert parsed["session_blocks"] == [
+        {"session_date": "2026-08-03", "session_text": "מפגש.\nהמשך המפגש."},
+        {"session_date": "2026-08-12", "session_text": "מפגש."},
+    ]
+    assert parsed["warnings"] == [
+        "התאריך '20/07' נכתב בלי שנה — הונחה השנה 2026",
+        "התאריך '12/08' נכתב בלי שנה — הונחה השנה 2026",
+    ]
+
+
+@pytest.mark.parametrize("start, expected_date, warning", [                  # 18, 2-ד
+    ("01/03/2026", "2026-03-01",
+     "לטבלת המטרות אין תאריך — נשמרה בתאריך תחילת הטיפול (01/03/2026)"),
+    ("", "2026-03-10",
+     "לטבלת המטרות אין תאריך — נשמרה בתאריך המפגש הראשון (10/03/2026)"),
+])
+def test_undated_goals_table(tmp_path, start, expected_date, warning):
+    parsed = _parse(_plan(tmp_path, start, [
+        Table([["מטרות:"], ["", "מטרה כללית"], ["תחביר", "משפט מורכב"]]),  # goal with no domain
+        "10/03/2026", "מפגש.",
+    ]))
+
+    assert parsed["goals_rows"] == [
+        {"session_date": expected_date, "goals_text": "מטרה כללית\nתחביר: משפט מורכב"}]
+    assert parsed["warnings"] == [warning]
+
+
+def test_undated_goals_table_without_start_or_sessions_blocks(tmp_path):     # 2-ד
+    with pytest.raises(ParseBlocked, match="לטבלת המטרות אין תאריך"):
+        _parse(_plan(tmp_path, "", [Table([["מטרות בתאריך"], ["תחביר", "משפט"]])]))
+
+
+def test_goals_table_with_only_empty_rows_is_no_record(tmp_path):            # 2-ה
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        Table([["מטרות בתאריך 01/03/2026"], ["", ""]]), "01/03/2026", "מפגש."]))
+    assert parsed["goals_rows"] == []
+
+
+@pytest.mark.parametrize("rows", [                                            # 2-א, 2-ב
+    [["סיכום"], ["א", "ב"]],                          # not a goals table
+    [["מטרות לשנה הבאה"], ["תחביר", "משפט"]],        # title text that is not a date
+    [["מטרות:"], ["תחביר", "משפט", "בבית"]],          # 3 columns
+    [["מטרות:"], ["תחביר", "משפט"], ["הערה כללית"]],  # merged row inside the table
+])
+def test_table_with_unknown_structure_blocks(tmp_path, rows):
+    with pytest.raises(ParseBlocked, match="מבנה לא מוכר"):
+        _parse(_plan(tmp_path, "01/03/2026", [Table(rows), "01/03/2026", "מפגש."]))
+
+
+def test_impossible_title_date_blocks(tmp_path):                             # 24a-1
+    with pytest.raises(DateError):
+        _parse(_plan(tmp_path, "01/03/2026", [
+            Table([["מטרות בתאריך 31/13/2026"], ["תחביר", "משפט"]])]))

@@ -1,14 +1,14 @@
 """
 adapter_b.py — Family B parser for treatment_plan documents.
 
-Parses .docx files that contain:
-  Layer 1 — A goals table (doc.tables[0]): rows of (session_date, goals_text)
-  Layer 2 — Session summaries: a line that is only a date starts a session;
-             the lines after it, up to the next date line, are its text.
+The body is read in document order:
+  Goals tables — title row 'מטרות [בתאריך] <date>', then 'domain | goal' rows;
+                 one goals record per table.
+  Sessions     — a line that is only a date starts a session; the lines after
+                 it, up to the next date line, are its text.
 
-Session dates and the treatment start date go through the shared date parser
-(app/ingestion/dates.py) and are stored as ISO 8601 YYYY-MM-DD. Goals-table
-dates still use the old helpers below until T2 part 2 replaces Layer 1.
+All dates go through the shared date parser (app/ingestion/dates.py) and are
+stored as ISO 8601 YYYY-MM-DD.
 """
 
 import logging
@@ -16,71 +16,13 @@ import re
 from datetime import datetime, date
 from typing import Optional
 
+from docx.table import Table
+
 from app.ingestion.adapter_a import _lines
-from app.ingestion.dates import ParsedDate, parse_date, resolve_dates
+from app.ingestion.dates import ParsedDate, format_date, parse_date, resolve_dates
 from app.ingestion.result import ParseBlocked
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Date format registry (tried in order)
-# ---------------------------------------------------------------------------
-
-# Each entry: (strptime_format, compiled_regex_for_quick_pre-check)
-LAYER2_DATE_FORMATS = [
-    ("%d/%m/%Y", re.compile(r"^\d{2}/\d{2}/\d{4}$")),
-    ("%d/%m/%Y", re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")),
-    ("%d.%m.%Y", re.compile(r"^\d{2}\.\d{2}\.\d{4}$")),
-    ("%d.%m.%Y", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{4}$")),
-]
-
-
-# ---------------------------------------------------------------------------
-# Date parsing helpers
-# ---------------------------------------------------------------------------
-
-def parse_layer2_date(line: str) -> Optional[str]:
-    """Try to parse *line* as a session-boundary date.
-
-    Formats are tried in the order defined by LAYER2_DATE_FORMATS.
-    The first successful parse wins and is returned as an ISO 8601 string
-    (YYYY-MM-DD).  Returns None if no format matches.
-
-    Parameters
-    ----------
-    line:
-        A single stripped line of text from the document.
-
-    Returns
-    -------
-    ISO date string ('YYYY-MM-DD') or None.
-    """
-    stripped = line.strip()
-    for fmt, pattern in LAYER2_DATE_FORMATS:
-        if pattern.match(stripped):
-            try:
-                parsed: date = datetime.strptime(stripped, fmt).date()
-                return parsed.isoformat()
-            except ValueError:
-                # strptime failed despite regex match (e.g. month=13) — try next
-                continue
-    return None
-
-
-def _normalize_table_date(raw: str) -> Optional[str]:
-    """Attempt to parse a table cell value as a date and return ISO 8601.
-
-    Uses the same format list as parse_layer2_date.  Returns the original
-    string unchanged if no format matches (best-effort — we do not block on
-    unparseable table dates).
-    """
-    if not raw or not raw.strip():
-        return None
-    iso = parse_layer2_date(raw.strip())
-    if iso:
-        return iso
-    # Return raw value as fallback — caller handles None from table cell
-    return raw.strip() or None
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +101,79 @@ def resolve_start_date(raw: Optional[str]) -> tuple[Optional[date], list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Goals tables (PLAN.md items 16–18; T2 decisions 2-א … 2-ה)
+# ---------------------------------------------------------------------------
+
+# 'מטרות בתאריך 27/07/2026', 'מטרות:', 'מטרות: בתאריך 2/8/26:', 'מטרות בתאריך' (undated)
+_GOALS_TITLE_RE = re.compile(r"מטרות\s*:?\s*(?:בתאריך)?\s*(?P<date>.*?)\s*:?")
+_UNKNOWN_TABLE_MSG = (
+    "בתוכנית יש טבלה במבנה לא מוכר (מתחילה ב-'{start}') — יש להשתמש בטבלת מטרות: "
+    "כותרת 'מטרות בתאריך …' ושתי עמודות, תחום ומטרה"
+)
+_UNDATED_TABLE_MSG = "לטבלת המטרות אין תאריך — נשמרה בתאריך {what} ({date})"
+_UNDATED_TABLE_BLOCK_MSG = (
+    "לטבלת המטרות אין תאריך, ואין בתוכנית תאריך תחילת טיפול או מפגש — "
+    "יש לכתוב תאריך בכותרת הטבלה (למשל 'מטרות בתאריך 10/07/2026')"
+)
+
+
+def _cell_text(cell) -> str:
+    """A cell's lines, stripped, joined with '; ' (T2 2-ג)."""
+    return "; ".join(line.strip() for line in cell.text.split("\n") if line.strip())
+
+
+def _is_merged(row) -> bool:
+    """True when the whole row is one merged cell."""
+    cells = row.cells
+    return len(cells) > 1 and all(c._tc is cells[0]._tc for c in cells)
+
+
+def read_goals_table(table: Table) -> tuple[Optional[ParsedDate], str]:
+    """(title date, or None when undated; record text) of a goals table.
+
+    Text: one line per domain, 'domain: goal1; goal2' (item 16). A row with a
+    blank domain continues the domain above; empty rows are skipped; a domain
+    without a goal, or a goal with no domain above it, is a line of its own.
+    Raises ParseBlocked for any table that is not a 2-column goals table (2-א),
+    DateError for an impossible title date.
+    """
+    first = table.rows[0].cells[0].text.strip()
+    unknown = ParseBlocked(_UNKNOWN_TABLE_MSG.format(start=first[:30]))
+    title = _GOALS_TITLE_RE.fullmatch(first)
+    if title is None or len(table.columns) != 2 or any(_is_merged(r) for r in table.rows[1:]):
+        raise unknown
+    title_date = parse_date(title["date"]) if title["date"] else None
+    if title["date"] and title_date is None:
+        raise unknown
+
+    entries: list[tuple[str, list[str]]] = []          # (domain, goals), table order
+    for row in table.rows[1:]:
+        domain, goal = (_cell_text(c) for c in row.cells)
+        if not domain and not goal:
+            continue
+        if domain or not entries:
+            entries.append((domain, []))
+        if goal:
+            entries[-1][1].append(goal)
+
+    lines = [
+        f"{domain}: {'; '.join(goals)}" if domain and goals else domain or "; ".join(goals)
+        for domain, goals in entries
+    ]
+    return title_date, "\n".join(lines)
+
+
+def _undated_table_date(start: Optional[date], first_session: Optional[date]) -> tuple[date, str]:
+    """Date + warning for a goals table with no date in its title (item 18, T2 2-ד)."""
+    if start is not None:
+        return start, _UNDATED_TABLE_MSG.format(what="תחילת הטיפול", date=format_date(start))
+    if first_session is not None:
+        return first_session, _UNDATED_TABLE_MSG.format(
+            what="המפגש הראשון", date=format_date(first_session))
+    raise ParseBlocked(_UNDATED_TABLE_BLOCK_MSG)
+
+
+# ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
 
@@ -181,6 +196,7 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         "goals_rows": list of {"session_date": str, "goals_text": str},
         "session_blocks": list of {"session_date": str, "session_text": str},
         "file_path": str,
+        "warnings": list[str],    # Hebrew, shown in the load report
     }
     """
     from docx import Document  # type: ignore
@@ -196,67 +212,56 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
     header["start_date"] = start.isoformat() if start else None
 
     # ------------------------------------------------------------------
-    # Layer 1 — Goals table (doc.tables[0])
+    # Body, in document order: goals tables and sessions
     # ------------------------------------------------------------------
-    goals_rows: list[dict] = []
-
-    if doc.tables:
-        table = doc.tables[0]
-        for row in table.rows:
-            cells = row.cells
-            if len(cells) < 2:
-                continue
-            raw_date = cells[0].text.strip()
-            goals_text = cells[1].text.strip()
-
-            if not raw_date and not goals_text:
-                # Blank row — skip
-                continue
-
-            iso_date = _normalize_table_date(raw_date)
-            if iso_date and goals_text:
-                goals_rows.append({
-                    "session_date": iso_date,
-                    "goals_text": goals_text,
-                })
-            elif goals_text:
-                # Date missing or unparseable — store with empty date
-                logger.warning(
-                    "parse_treatment_plan: goals table row has no parseable date "
-                    "(raw=%r) in %s — skipping row",
-                    raw_date,
-                    file_path,
-                )
-
-    # ------------------------------------------------------------------
-    # Layer 2 — Session summaries
-    # ------------------------------------------------------------------
-    # doc.paragraphs holds body paragraphs only (not table cells). Every line is
-    # handled on its own (Shift+Enter, T2 1-ג); a line that is only a date starts
-    # a session. Lines before the first date are header material (item 15).
-    lines = _lines(doc.paragraphs)
+    # Every written date (session lines, table titles) goes into ONE sequence in
+    # document order, so a missing year comes from the date written just before
+    # it (20b, T2 1-א).
     written: list[ParsedDate] = []
-    texts: list[list[str]] = []
-    for line in lines:
-        parsed = parse_date(line)        # an impossible date raises DateError → blocked
-        if parsed is not None:
-            written.append(parsed)
-            texts.append([])
-        elif texts:
-            texts[-1].append(line)
+    sessions: list[tuple[int, list[str]]] = []      # (index in written, text lines)
+    tables: list[tuple[Optional[int], str]] = []    # (index in written, None = undated; text)
+    for block in doc.iter_inner_content():
+        if isinstance(block, Table):
+            title_date, text = read_goals_table(block)
+            if title_date is not None:
+                written.append(title_date)
+            if text:
+                tables.append((len(written) - 1 if title_date is not None else None, text))
+            continue
+        # Every line on its own (Shift+Enter, T2 1-ג); a line that is only a date
+        # starts a session. Lines before the first date are header material
+        # (item 15); a table between sessions does not end the session around it.
+        for line in _lines([block]):
+            parsed = parse_date(line)    # an impossible date raises DateError → blocked
+            if parsed is not None:
+                written.append(parsed)
+                sessions.append((len(written) - 1, []))
+            elif sessions:
+                sessions[-1][1].append(line)
 
-    # Missing years inferred in document order, start date as the reference
-    # (20b, T2 1-א); future / before-start warnings (21a).
+    # Future / before-start warnings (21a).
     resolved = resolve_dates(written, start=start)
     warnings += resolved.warnings
+    dates = resolved.dates
+
     session_blocks = [
-        {"session_date": d.isoformat(), "session_text": "\n".join(text)}
-        for d, text in zip(resolved.dates, texts)
+        {"session_date": dates[i].isoformat(), "session_text": "\n".join(text)}
+        for i, text in sessions
         if text
     ]
 
+    first_session = dates[sessions[0][0]] if sessions else None
+    goals_rows: list[dict] = []
+    for i, text in tables:
+        if i is not None:
+            table_date = dates[i]
+        else:
+            table_date, warning = _undated_table_date(start, first_session)
+            warnings.append(warning)
+        goals_rows.append({"session_date": table_date.isoformat(), "goals_text": text})
+
     # Edge case: no date markers found anywhere in the free-text area
-    if not written and doc.paragraphs:
+    if not sessions and doc.paragraphs:
         fallback_date = header.get("start_date") or datetime.today().date().isoformat()
         logger.warning(
             "parse_treatment_plan: no session-date markers found in Layer 2 of %s. "
