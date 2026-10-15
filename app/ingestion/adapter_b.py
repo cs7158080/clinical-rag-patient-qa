@@ -3,18 +3,22 @@ adapter_b.py — Family B parser for treatment_plan documents.
 
 Parses .docx files that contain:
   Layer 1 — A goals table (doc.tables[0]): rows of (session_date, goals_text)
-  Layer 2 — Free-text session summaries appended below the table(s),
-             delimited by date lines.
+  Layer 2 — Session summaries: a line that is only a date starts a session;
+             the lines after it, up to the next date line, are its text.
 
-Date formats supported (in priority order):
-  DD/MM/YYYY, D/M/YYYY, DD.MM.YYYY, D.M.YYYY
-All dates are normalised to ISO 8601 YYYY-MM-DD before storage.
+Session dates and the treatment start date go through the shared date parser
+(app/ingestion/dates.py) and are stored as ISO 8601 YYYY-MM-DD. Goals-table
+dates still use the old helpers below until T2 part 2 replaces Layer 1.
 """
 
 import logging
 import re
 from datetime import datetime, date
 from typing import Optional
+
+from app.ingestion.adapter_a import _lines
+from app.ingestion.dates import ParsedDate, parse_date, resolve_dates
+from app.ingestion.result import ParseBlocked
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +94,7 @@ def extract_treatment_header(doc) -> dict:
     ------
     name           : text after 'שם:' / 'שם '
     date_of_birth  : text after 'ת.ל.:'
-    start_date     : text after 'תאריך התחלת הטיפול:' (ISO if parseable, else raw)
+    start_date     : text after 'תאריך התחלת הטיפול:' (raw — see resolve_start_date)
     main_goal      : text after 'מטרת על:'
     notes          : text after 'הערות:'
 
@@ -119,10 +123,8 @@ def extract_treatment_header(doc) -> dict:
         ("notes",         re.compile(r"הערות\s*:\s*(.+)")),
     ]
 
-    for para in doc.paragraphs[:15]:
-        text = para.text.strip()
-        if not text:
-            continue
+    # Header lives in the first 15 paragraphs; each may hold several lines (T2 1-ג).
+    for text in _lines(doc.paragraphs[:15]):
         for field_key, pattern in patterns:
             if result[field_key] is not None:
                 continue
@@ -132,13 +134,28 @@ def extract_treatment_header(doc) -> dict:
                 if value:
                     result[field_key] = value
 
-    # Normalise start_date to ISO if possible
-    if result["start_date"]:
-        iso = parse_layer2_date(result["start_date"])
-        if iso:
-            result["start_date"] = iso
-
     return result
+
+
+_START_DATE_MSG = (
+    "תאריך התחלת הטיפול '{raw}' אינו תאריך מלא — "
+    "יש לכתוב תאריך כולל שנה (למשל 10/07/2026)"
+)
+
+
+def resolve_start_date(raw: Optional[str]) -> tuple[Optional[date], list[str]]:
+    """The treatment start date from its header text, plus its warnings (T2 1-ב).
+
+    Empty → no start date. Otherwise it must be a full date incl. year:
+    anything else → ParseBlocked; an impossible date → DateError (both blocked).
+    """
+    if not raw:
+        return None, []
+    parsed = parse_date(raw)
+    if parsed is None or parsed.year is None:
+        raise ParseBlocked(_START_DATE_MSG.format(raw=raw))
+    resolved = resolve_dates([parsed])
+    return resolved.dates[0], resolved.warnings
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +192,8 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         raise
 
     header = extract_treatment_header(doc)
+    start, warnings = resolve_start_date(header["start_date"])
+    header["start_date"] = start.isoformat() if start else None
 
     # ------------------------------------------------------------------
     # Layer 1 — Goals table (doc.tables[0])
@@ -210,49 +229,34 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
                 )
 
     # ------------------------------------------------------------------
-    # Layer 2 — Session summaries (free text paragraphs after table(s))
+    # Layer 2 — Session summaries
     # ------------------------------------------------------------------
-    # We scan ALL paragraphs in the document; paragraphs that are inside
-    # a table body are skipped by python-docx's doc.paragraphs (it returns
-    # only body-level paragraphs, not table-cell paragraphs).
-    # So all paragraphs here are candidates for Layer 2 content.
+    # doc.paragraphs holds body paragraphs only (not table cells). Every line is
+    # handled on its own (Shift+Enter, T2 1-ג); a line that is only a date starts
+    # a session. Lines before the first date are header material (item 15).
+    lines = _lines(doc.paragraphs)
+    written: list[ParsedDate] = []
+    texts: list[list[str]] = []
+    for line in lines:
+        parsed = parse_date(line)        # an impossible date raises DateError → blocked
+        if parsed is not None:
+            written.append(parsed)
+            texts.append([])
+        elif texts:
+            texts[-1].append(line)
 
-    session_blocks: list[dict] = []
-    current_date: Optional[str] = None
-    current_lines: list[str] = []
-    found_any_date = False
-
-    for para in doc.paragraphs:
-        line = para.text.strip()
-        if not line:
-            continue
-
-        iso = parse_layer2_date(line)
-        if iso:
-            # Flush previous block
-            if current_date is not None and current_lines:
-                session_blocks.append({
-                    "session_date": current_date,
-                    "session_text": "\n".join(current_lines).strip(),
-                })
-            current_date = iso
-            current_lines = []
-            found_any_date = True
-        else:
-            if current_date is not None:
-                current_lines.append(line)
-            # Lines before the first date marker are ignored for Layer 2
-            # (they are typically header material already captured above)
-
-    # Flush the last open block
-    if current_date is not None and current_lines:
-        session_blocks.append({
-            "session_date": current_date,
-            "session_text": "\n".join(current_lines).strip(),
-        })
+    # Missing years inferred in document order, start date as the reference
+    # (20b, T2 1-א); future / before-start warnings (21a).
+    resolved = resolve_dates(written, start=start)
+    warnings += resolved.warnings
+    session_blocks = [
+        {"session_date": d.isoformat(), "session_text": "\n".join(text)}
+        for d, text in zip(resolved.dates, texts)
+        if text
+    ]
 
     # Edge case: no date markers found anywhere in the free-text area
-    if not found_any_date and doc.paragraphs:
+    if not written and doc.paragraphs:
         fallback_date = header.get("start_date") or datetime.today().date().isoformat()
         logger.warning(
             "parse_treatment_plan: no session-date markers found in Layer 2 of %s. "
@@ -281,4 +285,5 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         "goals_rows": goals_rows,
         "session_blocks": session_blocks,
         "file_path": file_path,
+        "warnings": warnings,
     }
