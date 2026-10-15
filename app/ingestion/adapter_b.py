@@ -4,8 +4,10 @@ adapter_b.py — Family B parser for treatment_plan documents.
 The body is read in document order:
   Goals tables — title row 'מטרות [בתאריך] <date>', then 'domain | goal' rows;
                  one goals record per table.
+  Home program — header row 'תאריך: | תחום טיפול: | המטפל: | …'; one line per row.
   Sessions     — a line that is only a date starts a session; the lines after
                  it, up to the next date line, are its text.
+Goals records (tables of both kinds) and sessions: one record per date (21b).
 
 All dates go through the shared date parser (app/ingestion/dates.py) and are
 stored as ISO 8601 YYYY-MM-DD.
@@ -107,8 +109,8 @@ def resolve_start_date(raw: Optional[str]) -> tuple[Optional[date], list[str]]:
 # 'מטרות בתאריך 27/07/2026', 'מטרות:', 'מטרות: בתאריך 2/8/26:', 'מטרות בתאריך' (undated)
 _GOALS_TITLE_RE = re.compile(r"מטרות\s*:?\s*(?:בתאריך)?\s*(?P<date>.*?)\s*:?")
 _UNKNOWN_TABLE_MSG = (
-    "בתוכנית יש טבלה במבנה לא מוכר (מתחילה ב-'{start}') — יש להשתמש בטבלת מטרות: "
-    "כותרת 'מטרות בתאריך …' ושתי עמודות, תחום ומטרה"
+    "הטבלה ה-{n} בתוכנית במבנה לא מוכר — יש להשתמש בטבלת מטרות (כותרת 'מטרות בתאריך …', "
+    "עמודות תחום ומטרה) או בטבלת תוכנית בית (שורת כותרת 'תאריך: | תחום טיפול: | …')"
 )
 _UNDATED_TABLE_MSG = "לטבלת המטרות אין תאריך — נשמרה בתאריך {what} ({date})"
 _UNDATED_TABLE_BLOCK_MSG = (
@@ -128,7 +130,7 @@ def _is_merged(row) -> bool:
     return len(cells) > 1 and all(c._tc is cells[0]._tc for c in cells)
 
 
-def read_goals_table(table: Table) -> tuple[Optional[ParsedDate], str]:
+def read_goals_table(table: Table, n: int) -> tuple[Optional[ParsedDate], str]:
     """(title date, or None when undated; record text) of a goals table.
 
     Text: one line per domain, 'domain: goal1; goal2' (item 16). A row with a
@@ -138,7 +140,7 @@ def read_goals_table(table: Table) -> tuple[Optional[ParsedDate], str]:
     DateError for an impossible title date.
     """
     first = table.rows[0].cells[0].text.strip()
-    unknown = ParseBlocked(_UNKNOWN_TABLE_MSG.format(start=first[:30]))
+    unknown = ParseBlocked(_UNKNOWN_TABLE_MSG.format(n=n))
     title = _GOALS_TITLE_RE.fullmatch(first)
     if title is None or len(table.columns) != 2 or any(_is_merged(r) for r in table.rows[1:]):
         raise unknown
@@ -161,6 +163,77 @@ def read_goals_table(table: Table) -> tuple[Optional[ParsedDate], str]:
         for domain, goals in entries
     ]
     return title_date, "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Home-program tables (PLAN.md item 19; T2 decisions 3-א … 3-ה)
+# ---------------------------------------------------------------------------
+
+_HOME_HEADER_PREFIX = "תאריך"
+
+
+def _is_home_header(row) -> bool:
+    return row.cells[0].text.strip().startswith(_HOME_HEADER_PREFIX)
+
+
+def read_home_program_table(table: Table, n: int) -> list[tuple[Optional[ParsedDate], str]]:
+    """(written date, None = no date above; text) per date group of a home-program table.
+
+    Merged rows before the 'תאריך:' header row (patient name) are skipped. Each
+    data row is one line, 'domain | label: value | …' (labels from the header row,
+    empty cells omitted); a row with an empty date belongs to the date above; a
+    merged row after the header is a note ('הערה: …') of the date above.
+    Raises ParseBlocked for any other structure, DateError for an impossible date.
+    """
+    unknown = ParseBlocked(_UNKNOWN_TABLE_MSG.format(n=n))
+    rows = list(table.rows)
+    header_at = next(i for i, row in enumerate(rows) if _is_home_header(row))
+    if not all(_is_merged(row) for row in rows[:header_at]):
+        raise unknown
+    labels = [cell.text.strip().rstrip(":").strip() for cell in rows[header_at].cells]
+
+    groups: list[tuple[Optional[ParsedDate], list[str]]] = []
+    for row in rows[header_at + 1:]:
+        if _is_merged(row):
+            if not groups:
+                raise unknown
+            note = _cell_text(row.cells[0])
+            if note:
+                groups[-1][1].append(f"הערה: {note}")
+            continue
+        cells = [_cell_text(cell) for cell in row.cells]
+        if not any(cells):
+            continue
+        if cells[0]:
+            written = parse_date(cells[0])
+            if written is None:
+                raise unknown
+            groups.append((written, []))
+        elif not groups:
+            groups.append((None, []))
+        parts = [cells[1]] if cells[1] else []                  # domain, unlabeled
+        parts += [f"{label}: {value}" for label, value in zip(labels[2:], cells[2:]) if value]
+        if parts:
+            groups[-1][1].append(" | ".join(parts))
+    return [(written, "\n".join(lines)) for written, lines in groups if lines]
+
+
+def read_table(table: Table, n: int) -> list[tuple[Optional[ParsedDate], str]]:
+    """Goals records of the n-th table of the plan, by its kind (T2 2-א, 3-א)."""
+    if table.rows[0].cells[0].text.strip().startswith("מטרות"):
+        title_date, text = read_goals_table(table, n)
+        return [(title_date, text)] if text else []
+    if any(_is_home_header(row) for row in table.rows):
+        return read_home_program_table(table, n)
+    raise ParseBlocked(_UNKNOWN_TABLE_MSG.format(n=n))
+
+
+def _merge_by_date(items) -> list[tuple[date, str]]:
+    """One entry per date, texts joined in document order (21b, T2 3-ו)."""
+    merged: dict[date, list[str]] = {}
+    for d, text in items:
+        merged.setdefault(d, []).append(text)
+    return [(d, "\n".join(texts)) for d, texts in merged.items()]
 
 
 def _undated_table_date(start: Optional[date], first_session: Optional[date]) -> tuple[date, str]:
@@ -219,14 +292,15 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
     # it (20b, T2 1-א).
     written: list[ParsedDate] = []
     sessions: list[tuple[int, list[str]]] = []      # (index in written, text lines)
-    tables: list[tuple[Optional[int], str]] = []    # (index in written, None = undated; text)
+    goals: list[tuple[Optional[int], str]] = []     # (index in written, None = undated; text)
+    n_tables = 0
     for block in doc.iter_inner_content():
         if isinstance(block, Table):
-            title_date, text = read_goals_table(block)
-            if title_date is not None:
-                written.append(title_date)
-            if text:
-                tables.append((len(written) - 1 if title_date is not None else None, text))
+            n_tables += 1
+            for table_date, text in read_table(block, n_tables):
+                if table_date is not None:
+                    written.append(table_date)
+                goals.append((len(written) - 1 if table_date is not None else None, text))
             continue
         # Every line on its own (Shift+Enter, T2 1-ג); a line that is only a date
         # starts a session. Lines before the first date are header material
@@ -245,20 +319,24 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
     dates = resolved.dates
 
     session_blocks = [
-        {"session_date": dates[i].isoformat(), "session_text": "\n".join(text)}
-        for i, text in sessions
-        if text
+        {"session_date": d.isoformat(), "session_text": text}
+        for d, text in _merge_by_date(
+            (dates[i], "\n".join(lines)) for i, lines in sessions if lines)
     ]
 
     first_session = dates[sessions[0][0]] if sessions else None
-    goals_rows: list[dict] = []
-    for i, text in tables:
+    dated_goals: list[tuple[date, str]] = []
+    for i, text in goals:
         if i is not None:
-            table_date = dates[i]
+            dated_goals.append((dates[i], text))
         else:
-            table_date, warning = _undated_table_date(start, first_session)
+            undated, warning = _undated_table_date(start, first_session)
             warnings.append(warning)
-        goals_rows.append({"session_date": table_date.isoformat(), "goals_text": text})
+            dated_goals.append((undated, text))
+    goals_rows = [
+        {"session_date": d.isoformat(), "goals_text": text}
+        for d, text in _merge_by_date(dated_goals)
+    ]
 
     # Edge case: no date markers found anywhere in the free-text area
     if not sessions and doc.paragraphs:

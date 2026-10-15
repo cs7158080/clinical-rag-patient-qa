@@ -163,6 +163,9 @@ def test_goals_table_with_only_empty_rows_is_no_record(tmp_path):            # 2
     [["מטרות לשנה הבאה"], ["תחביר", "משפט"]],        # title text that is not a date
     [["מטרות:"], ["תחביר", "משפט", "בבית"]],          # 3 columns
     [["מטרות:"], ["תחביר", "משפט"], ["הערה כללית"]],  # merged row inside the table
+    [["שורה", "רגילה"], ["תאריך:", "תחום טיפול:"], ["01/03/2026", "תחביר"]],  # non-merged row before header
+    [["תאריך:", "תחום טיפול:"], ["הערה לפני הנתונים"], ["01/03/2026", "תחביר"]],  # note before data
+    [["תאריך:", "תחום טיפול:"], ["בקרוב", "תחביר"]],                          # date cell not a date
 ])
 def test_table_with_unknown_structure_blocks(tmp_path, rows):
     with pytest.raises(ParseBlocked, match="מבנה לא מוכר"):
@@ -173,3 +176,63 @@ def test_impossible_title_date_blocks(tmp_path):                             # 2
     with pytest.raises(DateError):
         _parse(_plan(tmp_path, "01/03/2026", [
             Table([["מטרות בתאריך 31/13/2026"], ["תחביר", "משפט"]])]))
+
+
+_HOME_HEADER = ["תאריך:", "תחום טיפול:", "המטפל:", "מתי והיכן:", "יעדים:"]
+
+
+def test_home_program_tables_one_record_per_date(tmp_path):        # 19, 3-א … 3-ה, 21b
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        Table([
+            [_PATIENT],                                         # name row, skipped
+            _HOME_HEADER,
+            ["05/03/26", "שליפה", "אמא", "בבית", "מיון לקטגוריות\nתכונות"],
+            ["", "אורל מוטור", "אבא", "בערב", ""],               # inherits; empty cell omitted
+            ["בנוסף – לתאם פגישה עם הגננת."],                   # note row
+        ]),
+        "05/03/2026", "מפגש.",
+        Table([
+            ["תאריך:", "תחום טיפול:", "המטפל:", "יעדים:"],      # 4 columns, no name row
+            ["12/03", "תחביר", "גננת", "משפט פשוט"],            # no year → previous date
+            ["05/03/2026", "שטף", "אמא", "קריאה משותפת"],       # same date as table 1 → merged
+        ]),
+    ]))
+
+    assert parsed["goals_rows"] == [
+        {"session_date": "2026-03-05", "goals_text":
+            "שליפה | המטפל: אמא | מתי והיכן: בבית | יעדים: מיון לקטגוריות; תכונות\n"
+            "אורל מוטור | המטפל: אבא | מתי והיכן: בערב\n"
+            "הערה: בנוסף – לתאם פגישה עם הגננת.\n"
+            "שטף | המטפל: אמא | יעדים: קריאה משותפת"},
+        {"session_date": "2026-03-12", "goals_text": "תחביר | המטפל: גננת | יעדים: משפט פשוט"},
+    ]
+    assert parsed["warnings"] == ["התאריך '12/03' נכתב בלי שנה — הונחה השנה 2026"]
+
+
+def test_home_program_first_row_without_date_takes_the_start_date(tmp_path):   # 3-ג
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        Table([["תאריך:", "תחום טיפול:", "המטפל:", "יעדים:"], ["", "תחביר", "אמא", "משפט"]]),
+        "05/03/2026", "מפגש.",
+    ]))
+    assert parsed["goals_rows"] == [
+        {"session_date": "2026-03-01", "goals_text": "תחביר | המטפל: אמא | יעדים: משפט"}]
+    assert parsed["warnings"] == [
+        "לטבלת המטרות אין תאריך — נשמרה בתאריך תחילת הטיפול (01/03/2026)"]
+
+
+def test_same_session_date_twice_is_one_record(tmp_path):                  # 21b, 3-ו
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        "08/03/2026", "שיחה עם אמא.", "08/03/2026", "שיחה עם המורה."]))
+    assert parsed["session_blocks"] == [
+        {"session_date": "2026-03-08", "session_text": "שיחה עם אמא.\nשיחה עם המורה."}]
+    assert parsed["warnings"] == []
+
+
+def test_unknown_table_message_names_the_table_by_number(tmp_path):        # 3-ח
+    with pytest.raises(ParseBlocked) as exc:
+        _parse(_plan(tmp_path, "01/03/2026", [
+            Table([["מטרות:"], ["תחביר", "משפט"]]),
+            Table([[_PATIENT], ["סיכום", "טקסט"]]),
+        ]))
+    assert "הטבלה ה-2" in str(exc.value)
+    assert _PATIENT not in str(exc.value)
