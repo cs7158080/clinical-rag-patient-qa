@@ -236,3 +236,32 @@ def test_unknown_table_message_names_the_table_by_number(tmp_path):        # 3-�
         ]))
     assert "הטבלה ה-2" in str(exc.value)
     assert _PATIENT not in str(exc.value)
+
+
+def test_goals_only_plan_has_no_sessions(tmp_path):                       # 22, 4-א
+    parsed = _parse(_plan(tmp_path, "16/08/2026", [
+        "מטרת על: ", Table([["מטרות בתאריך 16/8"], ["לקסיקון", "שליפה"]])]))
+
+    assert parsed["session_blocks"] == []
+    assert parsed["goals_rows"] == [{"session_date": "2026-08-16", "goals_text": "לקסיקון: שליפה"}]
+
+
+@pytest.mark.parametrize("body", [                                         # 22, 4-ב
+    [],                                            # header only
+    ["מטרת על: שיפור השיח", "הערות: לעקוב"],      # header fields only
+    ["טקסט בלי שום תאריך."],                       # free text without a date line
+    ["01/03/2026"],                                # a date with no text
+])
+def test_plan_without_goals_or_sessions_blocks(tmp_path, body):
+    with pytest.raises(ParseBlocked, match="לא נמצא תוכן בתוכנית הטיפול"):
+        _parse(_plan(tmp_path, "01/03/2026", body))
+
+
+def test_signature_block_is_not_stored(tmp_path):                          # N9, 4-ג
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        "05/03/2026", "מפגש.", "בברכה,", "המטפלת", "קלינאית תקשורת מ.ר. 00000",
+        "12/03/2026", "מפגש שני.",
+        "19/03/2026", "מפגש שלישי.", "המטפלת, מ.ר. 00000",
+    ]))
+    assert [b["session_text"] for b in parsed["session_blocks"]] == [
+        "מפגש.", "מפגש שני.", "מפגש שלישי."]

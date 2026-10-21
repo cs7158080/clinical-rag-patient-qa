@@ -15,12 +15,12 @@ stored as ISO 8601 YYYY-MM-DD.
 
 import logging
 import re
-from datetime import datetime, date
+from datetime import date
 from typing import Optional
 
 from docx.table import Table
 
-from app.ingestion.adapter_a import _lines
+from app.ingestion.adapter_a import _SIGNATURE_SENTINEL, _lines
 from app.ingestion.dates import ParsedDate, format_date, parse_date, resolve_dates
 from app.ingestion.result import ParseBlocked
 
@@ -81,6 +81,11 @@ def extract_treatment_header(doc) -> dict:
     return result
 
 
+_SIGNATURE_START = "בברכה"
+_NO_CONTENT_MSG = (
+    "לא נמצא תוכן בתוכנית הטיפול — אין טבלת מטרות ואין מפגשים "
+    "(שורה שכולה תאריך ואחריה טקסט)"
+)
 _START_DATE_MSG = (
     "תאריך התחלת הטיפול '{raw}' אינו תאריך מלא — "
     "יש לכתוב תאריך כולל שנה (למשל 10/07/2026)"
@@ -294,6 +299,7 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
     sessions: list[tuple[int, list[str]]] = []      # (index in written, text lines)
     goals: list[tuple[Optional[int], str]] = []     # (index in written, None = undated; text)
     n_tables = 0
+    in_signature = False
     for block in doc.iter_inner_content():
         if isinstance(block, Table):
             n_tables += 1
@@ -305,12 +311,17 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         # Every line on its own (Shift+Enter, T2 1-ג); a line that is only a date
         # starts a session. Lines before the first date are header material
         # (item 15); a table between sessions does not end the session around it.
+        # A signature ('בברכה' / 'מ.ר.') and the lines after it are not stored,
+        # up to the next date line (N9).
         for line in _lines([block]):
             parsed = parse_date(line)    # an impossible date raises DateError → blocked
             if parsed is not None:
                 written.append(parsed)
                 sessions.append((len(written) - 1, []))
-            elif sessions:
+                in_signature = False
+            elif line.startswith(_SIGNATURE_START) or _SIGNATURE_SENTINEL in line:
+                in_signature = True
+            elif sessions and not in_signature:
                 sessions[-1][1].append(line)
 
     # Future / before-start warnings (21a).
@@ -338,21 +349,9 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         for d, text in _merge_by_date(dated_goals)
     ]
 
-    # Edge case: no date markers found anywhere in the free-text area
-    if not sessions and doc.paragraphs:
-        fallback_date = header.get("start_date") or datetime.today().date().isoformat()
-        logger.warning(
-            "parse_treatment_plan: no session-date markers found in Layer 2 of %s. "
-            "Treating all text as a single block with session_date=%s",
-            file_path,
-            fallback_date,
-        )
-        all_lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        if all_lines:
-            session_blocks.append({
-                "session_date": fallback_date,
-                "session_text": "\n".join(all_lines).strip(),
-            })
+    # A goals-only plan is valid; no goals and no sessions → nothing to load (22).
+    if not goals_rows and not session_blocks:
+        raise ParseBlocked(_NO_CONTENT_MSG)
 
     logger.info(
         "parse_treatment_plan: parsed %s — goals_rows=%d session_blocks=%d",
