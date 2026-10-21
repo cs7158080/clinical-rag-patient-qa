@@ -54,6 +54,7 @@ from app.storage.db import (
     insert_treatment_goals,
     insert_treatment_session,
     mark_file_ingested,
+    transaction,
     upsert_patient_metadata,
 )
 from app.storage.models import (
@@ -114,7 +115,7 @@ _DOB_CONFLICT_MSG = (
     "תאריך הלידה בקובץ ({new}) שונה מזה שבמסמך אחר של המטופל ({stored}) — "
     "נשמר {stored}, כדאי לבדוק"
 )
-_STALE_DELETE_MSG = "מחיקת הנתונים הקודמים של הקובץ נכשלה — הנתונים הקודמים נשמרו. נסי לטעון שוב"
+_STORE_FAILED_MSG = "שמירת הנתונים נכשלה — הנתונים הקודמים נשמרו. נסי לטעון שוב"
 
 
 def normalize_date_of_birth(raw: Optional[str]) -> tuple[Optional[str], list[str]]:
@@ -418,10 +419,12 @@ class IngestionWorkflow(Workflow):
         return TreatmentEmbedEvent(parsed_data=ev.parsed_data)
 
     # ------------------------------------------------------------------
-    # Stale-data cleanup for re-ingested files
+    # Store helpers (PLAN.md 24a: one SQLite transaction per file)
     # ------------------------------------------------------------------
 
-    def _store_date_of_birth(self, patient_id: str, dob: Optional[str], file_path: str) -> list[str]:
+    def _store_date_of_birth(
+        self, patient_id: str, dob: Optional[str], file_path: str, conn=None
+    ) -> list[str]:
         """Store the patient's DOB (ISO) unless ANOTHER file already stored a different one.
 
         The first stored value stays and a differing value from another file is a
@@ -430,40 +433,42 @@ class IngestionWorkflow(Workflow):
         """
         if not dob:
             return []
-        metadata = get_patient_metadata(self._db_path, patient_id)
+        metadata = get_patient_metadata(self._db_path, patient_id, conn=conn)
         stored = _iso_date(metadata.get("date_of_birth"))
         if stored is not None and metadata.get("date_of_birth_source") != file_path:
             if stored.isoformat() == dob:
                 return []
             return [_DOB_CONFLICT_MSG.format(
                 new=format_date(date.fromisoformat(dob)), stored=format_date(stored))]
-        upsert_patient_metadata(self._db_path, patient_id, "date_of_birth", dob)
-        upsert_patient_metadata(self._db_path, patient_id, "date_of_birth_source", file_path)
+        upsert_patient_metadata(self._db_path, patient_id, "date_of_birth", dob, conn=conn)
+        upsert_patient_metadata(
+            self._db_path, patient_id, "date_of_birth_source", file_path, conn=conn
+        )
         return []
 
-    def _delete_stale_data(self, file_path: str) -> bool:
-        """Delete previously stored rows/vectors for a re-ingested file.
+    def _store_patient_metadata(self, data: dict, conn) -> None:
+        """Display name, DOB (+ conflict warning into data["warnings"]), HMO, national id."""
+        patient_id: str = data["patient_id"]
+        header: dict = data.get("header", {})
+        data["warnings"] = data.get("warnings", []) + self._store_date_of_birth(
+            patient_id, header.get("date_of_birth"), data["file_path"], conn=conn
+        )
+        for field_name in ("hmo_name", "national_id"):
+            if header.get(field_name):
+                upsert_patient_metadata(
+                    self._db_path, patient_id, field_name, header[field_name], conn=conn
+                )
+        upsert_patient_metadata(
+            self._db_path, patient_id, "display_name", data["patient_folder_name"], conn=conn
+        )
 
-        Called at the start of the store steps — after parsing, de-id,
-        validation, and embedding have all succeeded — so a blocked or
-        failed re-ingest keeps the previous good data. Returns False if
-        Pinecone deletion failed (caller must abort).
-        """
-        if get_file_hash(self._db_path, file_path) is None:
-            return True
-        try:
-            prior_ids = get_pinecone_ids_for_file(self._db_path, file_path)
-            if prior_ids:
-                delete_vectors(self._pinecone_index, prior_ids)
-        except Exception as exc:
-            logger.error(
-                "delete_stale_data: Pinecone deletion failed for %s: %s — aborting",
-                file_path,
-                exc,
-            )
-            return False
-        delete_rows_for_file(self._db_path, file_path)
-        return True
+    def _finish(self, data: dict, step_name: str) -> StopEvent:
+        """After a successful store: save the re-id map, report ok."""
+        save_reid_map(
+            os.path.join(self._config.data_dir, "reid_map.json"), self._reid_map
+        )
+        logger.info("%s: ingested %s", step_name, data["file_path"])
+        return StopEvent(result=IngestResult("ok", warnings=data.get("warnings", [])))
 
     # ------------------------------------------------------------------
     # Step 5a: Store Family A (SQLite only — no embeddings)
@@ -473,65 +478,46 @@ class IngestionWorkflow(Workflow):
     async def store_family_a_step(
         self, ctx: Context, ev: FamilyAStoreEvent
     ) -> StopEvent:
-        """Write Family A sections and domain findings to SQLite."""
+        """Replace the file's Family A sections and domain findings in ONE SQLite transaction."""
 
         data = ev.parsed_data
         patient_id: str = data["patient_id"]
         template_type: str = data["template_type"]
         session_date: str = data["header"].get("date") or ""
         file_path: str = data["file_path"]
-        header: dict = data["header"]
-
-        if not self._delete_stale_data(file_path):
-            return StopEvent(result=IngestResult("error", _STALE_DELETE_MSG))
-
-        # Upsert static patient metadata
-        data["warnings"] = data.get("warnings", []) + self._store_date_of_birth(
-            patient_id, header.get("date_of_birth"), file_path
-        )
-        if header.get("hmo_name"):
-            upsert_patient_metadata(
-                self._db_path, patient_id, "hmo_name", header["hmo_name"]
-            )
-        if header.get("national_id"):
-            upsert_patient_metadata(
-                self._db_path, patient_id, "national_id", header["national_id"]
-            )
-        upsert_patient_metadata(
-            self._db_path, patient_id, "display_name", data["patient_folder_name"]
-        )
-
-        # Insert section chunks
-        for section_key, text in data.get("sections", {}).items():
-            chunk = FamilyAChunk(
-                patient_id=patient_id,
-                template_type=template_type,
-                session_date=session_date,
-                section=section_key,
-                text_deidentified=text,
-                source_file_path=file_path,
-            )
-            insert_family_a_chunk(self._db_path, chunk)
-
-        # Insert domain findings (both Family A types)
         parent_domains: dict = data.get("parent_domains", {})
 
-        for domain_name, domain_text in data.get("domains", {}).items():
-            finding = DomainFinding(
-                patient_id=patient_id,
-                session_date=session_date,
-                domain_name=domain_name,
-                domain_text_deidentified=domain_text,
-                parent_domain=parent_domains.get(domain_name),
-            )
-            insert_domain_finding(self._db_path, finding)
+        # Old rows out, new rows in, file marked ingested — all or nothing (24a, T2 6-א/6-ג)
+        try:
+            with transaction(self._db_path) as conn:
+                delete_rows_for_file(self._db_path, file_path, conn=conn)
+                self._store_patient_metadata(data, conn)
 
-        mark_file_ingested(self._db_path, file_path, data["file_hash"])
-        save_reid_map(
-            os.path.join(self._config.data_dir, "reid_map.json"), self._reid_map
-        )
-        logger.info("store_family_a_step: ingested Family A file: %s", file_path)
-        return StopEvent(result=IngestResult("ok", warnings=data.get("warnings", [])))
+                for section_key, text in data.get("sections", {}).items():
+                    insert_family_a_chunk(self._db_path, FamilyAChunk(
+                        patient_id=patient_id,
+                        template_type=template_type,
+                        session_date=session_date,
+                        section=section_key,
+                        text_deidentified=text,
+                        source_file_path=file_path,
+                    ), conn=conn)
+
+                for domain_name, domain_text in data.get("domains", {}).items():
+                    insert_domain_finding(self._db_path, DomainFinding(
+                        patient_id=patient_id,
+                        session_date=session_date,
+                        domain_name=domain_name,
+                        domain_text_deidentified=domain_text,
+                        parent_domain=parent_domains.get(domain_name),
+                    ), conn=conn)
+
+                mark_file_ingested(self._db_path, file_path, data["file_hash"], conn=conn)
+        except Exception:
+            logger.exception("store_family_a_step: store failed, previous data kept: %s", file_path)
+            return StopEvent(result=IngestResult("error", _STORE_FAILED_MSG))
+
+        return self._finish(data, "store_family_a_step")
 
     # ------------------------------------------------------------------
     # Step 5b: Embed treatment plan chunks
@@ -572,15 +558,6 @@ class IngestionWorkflow(Workflow):
                 "pinecone_id": pinecone_id,
             })
 
-        # Upsert static patient metadata from treatment plan header
-        header = data.get("header", {})
-        data["warnings"] = data.get("warnings", []) + self._store_date_of_birth(
-            patient_id, header.get("date_of_birth"), data["file_path"]
-        )
-        upsert_patient_metadata(
-            self._db_path, patient_id, "display_name", data["patient_folder_name"]
-        )
-
         return EmbeddedEvent(
             parsed_data=data,
             goals_embedded=goals_embedded,
@@ -595,13 +572,11 @@ class IngestionWorkflow(Workflow):
     async def store_treatment_step(
         self, ctx: Context, ev: EmbeddedEvent
     ) -> StopEvent:
-        """Upsert embeddings to Pinecone and write chunks to SQLite."""
+        """Safe store order (24a): upsert new vectors → ONE SQLite transaction
+        (old rows out, new rows in) → prune old vector ids not overwritten."""
         data = ev.parsed_data
         patient_id: str = data["patient_id"]
         file_path: str = data["file_path"]
-
-        if not self._delete_stale_data(file_path):
-            return StopEvent(result=IngestResult("error", _STALE_DELETE_MSG))
 
         # Build Pinecone vector list
         pinecone_vectors: list[dict] = []
@@ -628,48 +603,65 @@ class IngestionWorkflow(Workflow):
                 },
             })
 
-        if pinecone_vectors:
-            upsert_vectors(self._pinecone_index, pinecone_vectors)
+        try:
+            old_ids = set(get_pinecone_ids_for_file(self._db_path, file_path))
 
-        # Write goals rows to SQLite
-        for item in ev.goals_embedded:
-            chunk = TreatmentGoalsChunk(
-                patient_id=patient_id,
-                session_date=item["session_date"],
-                goals_text_deidentified=item["goals_text"],
-                pinecone_id=item["pinecone_id"],
-                source_file_path=file_path,
-            )
-            insert_treatment_goals(self._db_path, chunk)
+            # 1. New vectors first — a failure here leaves SQLite untouched.
+            if pinecone_vectors:
+                upsert_vectors(self._pinecone_index, pinecone_vectors)
 
-        # Write session blocks to SQLite
-        for item in ev.sessions_embedded:
-            chunk = TreatmentSessionChunk(
-                patient_id=patient_id,
-                session_date=item["session_date"],
-                session_text_deidentified=item["session_text"],
-                pinecone_id=item["pinecone_id"],
-                source_file_path=file_path,
-            )
-            insert_treatment_session(self._db_path, chunk)
+            # 2. Old rows out, new rows in, file marked ingested — all or nothing.
+            with transaction(self._db_path) as conn:
+                delete_rows_for_file(self._db_path, file_path, conn=conn)
+                self._store_patient_metadata(data, conn)
 
-        # Plan header fields (19a, O4.1) — document_sections rows, one date (T2 5-ג)
-        for section_key, text in data.get("sections", {}).items():
-            insert_family_a_chunk(self._db_path, FamilyAChunk(
-                patient_id=patient_id,
-                template_type="treatment_plan",
-                session_date=data["sections_date"],
-                section=section_key,
-                text_deidentified=text,
-                source_file_path=file_path,
-            ))
+                for item in ev.goals_embedded:
+                    insert_treatment_goals(self._db_path, TreatmentGoalsChunk(
+                        patient_id=patient_id,
+                        session_date=item["session_date"],
+                        goals_text_deidentified=item["goals_text"],
+                        pinecone_id=item["pinecone_id"],
+                        source_file_path=file_path,
+                    ), conn=conn)
 
-        mark_file_ingested(self._db_path, file_path, data["file_hash"])
-        save_reid_map(
-            os.path.join(self._config.data_dir, "reid_map.json"), self._reid_map
-        )
-        logger.info("store_treatment_step: ingested treatment plan: %s", file_path)
-        return StopEvent(result=IngestResult("ok", warnings=data.get("warnings", [])))
+                for item in ev.sessions_embedded:
+                    insert_treatment_session(self._db_path, TreatmentSessionChunk(
+                        patient_id=patient_id,
+                        session_date=item["session_date"],
+                        session_text_deidentified=item["session_text"],
+                        pinecone_id=item["pinecone_id"],
+                        source_file_path=file_path,
+                    ), conn=conn)
+
+                # Plan header fields (19a, O4.1) — document_sections rows, one date (T2 5-ג)
+                for section_key, text in data.get("sections", {}).items():
+                    insert_family_a_chunk(self._db_path, FamilyAChunk(
+                        patient_id=patient_id,
+                        template_type="treatment_plan",
+                        session_date=data["sections_date"],
+                        section=section_key,
+                        text_deidentified=text,
+                        source_file_path=file_path,
+                    ), conn=conn)
+
+                mark_file_ingested(self._db_path, file_path, data["file_hash"], conn=conn)
+        except Exception:
+            logger.exception("store_treatment_step: store failed, previous data kept: %s", file_path)
+            return StopEvent(result=IngestResult("error", _STORE_FAILED_MSG))
+
+        # 3. Prune old vectors the new ones did not overwrite. A failure only leaves
+        #    orphan vectors — they resolve to no SQLite row (T2 6-ד): log only.
+        stale_ids = sorted(old_ids - {v["id"] for v in pinecone_vectors})
+        if stale_ids:
+            try:
+                delete_vectors(self._pinecone_index, stale_ids)
+            except Exception as exc:
+                logger.warning(
+                    "store_treatment_step: %d old vector(s) left in Pinecone for %s: %s",
+                    len(stale_ids), file_path, exc,
+                )
+
+        return self._finish(data, "store_treatment_step")
 
 
 # ---------------------------------------------------------------------------
