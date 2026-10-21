@@ -40,6 +40,19 @@ THEME_COLORS = {
     'border': '#E2E8F0',
 }
 
+# Shown at once when a question is sent; Gradio's spinner is invisible over an empty
+# gr.Markdown (T6, item 32).
+THINKING_MESSAGE = "⏳ מחפשת תשובה…"
+
+
+def lock_question():
+    """Show the indicator and block re-sending (button and Enter) while the answer is computed."""
+    return THINKING_MESSAGE, gr.update(interactive=False), gr.update(interactive=False)
+
+
+def unlock_question():
+    return gr.update(interactive=True), gr.update(interactive=True)
+
 
 def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: str):
 
@@ -187,7 +200,8 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
                 question_input = gr.Textbox(
                     label="שאלה",
                     placeholder="לדוגמה: על מה עבדנו בשלושת החודשים האחרונים?",
-                    lines=2,
+                    lines=1,  # Enter submits only when lines == 1 (Gradio 6 Textbox)
+                    max_lines=5,
                 )
                 submit_btn = gr.Button("שלח", variant="primary")
                 answer_output = gr.Markdown()
@@ -260,11 +274,21 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
             outputs=[open_file_status],
         )
 
-        submit_btn.click(
-            fn=ask_question,
-            inputs=[question_input, patient_dropdown],
-            outputs=[answer_output],
-        )
+        for trigger in (submit_btn.click, question_input.submit):
+            trigger(
+                fn=lock_question,
+                outputs=[answer_output, question_input, submit_btn],
+                queue=False,
+            ).then(
+                fn=ask_question,
+                inputs=[question_input, patient_dropdown],
+                outputs=[answer_output],
+                show_progress="hidden",
+            ).then(
+                fn=unlock_question,
+                outputs=[question_input, submit_btn],
+                queue=False,
+            )
 
         generate_btn.click(
             fn=generate_summary,
