@@ -105,6 +105,19 @@ def _domain_chunks(db_path: str, patient_id: str, session_date: str) -> list[str
     ]
 
 
+def _plan_header_chunks(db_path: str, patient_id: str) -> list[str]:
+    """Treatment-plan header fields (מטרת על, הערות, …) as dated chunks.
+
+    Prepended to the context of every answer built from treatment-plan data
+    (PLAN.md O4.2, T2 5-ו) — only when that answer has results of its own.
+    """
+    return [
+        _dated_chunk(c.section, c.session_date, c.text_deidentified)
+        for c in db.fetch_document_sections(db_path, patient_id, "treatment_plan")
+        if c.text_deidentified
+    ]
+
+
 def _fetch_family_a(db_path: str, params: QueryParams) -> RetrievalResult | str:
     """Fetch from document_sections, applying date resolution per Step 6."""
     # date resolution: date_latest=true OR (date_from is None and date_latest=False)
@@ -165,9 +178,10 @@ def _fetch_treatment_sessions(db_path: str, params: QueryParams) -> RetrievalRes
     ]
     if not texts:
         return NO_RESULTS_MESSAGE
+    texts = _plan_header_chunks(db_path, params.patient_id) + texts
 
     logger.info(
-        "treatment_sessions_sqlite: retrieved %d session(s) for patient=%s",
+        "treatment_sessions_sqlite: retrieved %d chunk(s) for patient=%s",
         len(texts),
         params.patient_id,
     )
@@ -233,7 +247,8 @@ def _fetch_compare(db_path: str, params: QueryParams) -> RetrievalResult | str:
     if not after:
         return NO_SESSIONS_AFTER
 
-    before_texts = [
+    # Plan header fields first in "before" — set at treatment start (T2 5-ו)
+    before_texts = _plan_header_chunks(db_path, params.patient_id) + [
         _dated_chunk('טיפול', s.session_date, s.session_text_deidentified)
         for s in before
         if s.session_text_deidentified
@@ -354,6 +369,7 @@ def _pinecone_retrieve(
 
     if not texts:
         return NO_RESULTS_MESSAGE
+    texts = _plan_header_chunks(db_path, params.patient_id) + texts
 
     logger.info(
         "Pinecone returned %d match(es), resolved %d text(s) from SQLite for patient=%s",
@@ -376,9 +392,10 @@ def _sqlite_fallback(db_path: str, params: QueryParams) -> RetrievalResult | str
     ]
     if not texts:
         return NO_RESULTS_MESSAGE
+    texts = _plan_header_chunks(db_path, params.patient_id) + texts
 
     logger.info(
-        "SQLite fallback: retrieved %d session(s) for patient=%s", len(texts), params.patient_id
+        "SQLite fallback: retrieved %d chunk(s) for patient=%s", len(texts), params.patient_id
     )
     return RetrievalResult(
         chunks=texts, source_table='treatment_sessions_fallback', count=len(texts)
