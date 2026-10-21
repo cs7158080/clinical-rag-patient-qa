@@ -43,7 +43,7 @@ def extract_treatment_header(lines: list[str]) -> dict:
     Fields
     ------
     name             : text after 'שם:' / 'שם '
-    date_of_birth    : text after 'ת.ל.:'
+    date_of_birth    : text after 'ת.ל' + anything attached to it + ':' (raw)
     start_date       : text after 'תאריך התחלת הטיפול:' (raw — see resolve_start_date)
     main_goal        : text after 'מטרת על:'
     notes            : text after 'הערות:'
@@ -64,7 +64,8 @@ def extract_treatment_header(lines: list[str]) -> dict:
 
     patterns = [
         ("name",             re.compile(r"שם\s*[:\s]\s*(.+)")),
-        ("date_of_birth",    re.compile(r"ת\.ל\.\s*:\s*(.+)")),
+        # 'ת.ל:', 'ת.ל.:', 'ת.ל. :' … — same rule as adapter_a (item 9, T1 3-ה, 28a-1)
+        ("date_of_birth",    re.compile(r"ת\.ל[^\s:]*\s*:\s*(.+)")),
         ("start_date",       re.compile(r"תאריך התחלת הטיפול\s*:\s*(.+)")),
         ("main_goal",        re.compile(r"מטרת על\s*:\s*(.+)")),
         ("notes",            re.compile(r"הערות\s*:\s*(.+)")),

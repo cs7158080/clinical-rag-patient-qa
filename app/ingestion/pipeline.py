@@ -20,7 +20,8 @@ import hashlib
 import logging
 import os
 import traceback
-from typing import Union
+from datetime import date
+from typing import Optional, Union
 
 from llama_index.core.workflow import (  # type: ignore
     Context,
@@ -46,6 +47,7 @@ from app.deidentification.validation import validate_deidentified
 from app.storage.db import (
     delete_rows_for_file,
     get_file_hash,
+    get_patient_metadata,
     get_pinecone_ids_for_file,
     insert_domain_finding,
     insert_family_a_chunk,
@@ -64,7 +66,7 @@ from app.storage.pinecone_client import delete_vectors, get_cohere_embedding, up
 from app.ingestion.adapter_a import parse_family_a
 from app.ingestion.classify import TYPE_LABELS, classify_filename
 from app.ingestion.adapter_b import parse_treatment_plan
-from app.ingestion.dates import DateError
+from app.ingestion.dates import DateError, format_date, parse_date, resolve_dates
 from app.ingestion.result import IngestResult, ParseBlocked
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,33 @@ _VALIDATION_MESSAGES = {
     "reid_map": "נמצא בטקסט שם או פרט מזהה מוכר שלא הוסר" + _PRIVACY_SUFFIX,
     "ner_rescan": "בדיקת הפרטיות מצאה שם שייתכן שלא הוסר" + _PRIVACY_SUFFIX,
 }
+_DOB_INVALID_MSG = "תאריך הלידה '{raw}' אינו תאריך לידה תקין — לא נשמר, כדאי לבדוק"
+_DOB_CONFLICT_MSG = (
+    "תאריך הלידה בקובץ ({new}) שונה מזה שבמסמך אחר של המטופל ({stored}) — "
+    "נשמר {stored}, כדאי לבדוק"
+)
 _STALE_DELETE_MSG = "מחיקת הנתונים הקודמים של הקובץ נכשלה — הנתונים הקודמים נשמרו. נסי לטעון שוב"
+
+
+def normalize_date_of_birth(raw: Optional[str]) -> tuple[Optional[str], list[str]]:
+    """A full, real, past date of birth → ISO; anything else → None + warning (T2 28a-2)."""
+    if not raw:
+        return None, []
+    try:
+        parsed = parse_date(raw)
+        resolved = resolve_dates([parsed]) if parsed and parsed.year else None
+    except DateError:
+        resolved = None
+    if resolved is None or resolved.warnings:      # not a date, no year, impossible, future
+        return None, [_DOB_INVALID_MSG.format(raw=raw)]
+    return resolved.dates[0].isoformat(), []
+
+
+def _iso_date(value: Optional[str]) -> Optional[date]:
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
 
 
 class FamilyAStoreEvent(Event):
@@ -203,6 +231,11 @@ class IngestionWorkflow(Workflow):
                 "error", "שגיאה בקריאת תוכן המסמך — הפרטים נרשמו ביומן"))
 
         parsed_data["file_hash"] = file_hash
+
+        # Date of birth: a full date → ISO, anything else → warning, not stored (28a-2)
+        header = parsed_data["header"]
+        header["date_of_birth"], dob_warnings = normalize_date_of_birth(header.get("date_of_birth"))
+        parsed_data["warnings"] = parsed_data.get("warnings", []) + dob_warnings
 
         return ParsedEvent(template_type=template_type, parsed_data=parsed_data)
 
@@ -388,6 +421,26 @@ class IngestionWorkflow(Workflow):
     # Stale-data cleanup for re-ingested files
     # ------------------------------------------------------------------
 
+    def _store_date_of_birth(self, patient_id: str, dob: Optional[str], file_path: str) -> list[str]:
+        """Store the patient's DOB (ISO) unless ANOTHER file already stored a different one.
+
+        The first stored value stays and a differing value from another file is a
+        warning (28a-3); re-ingesting the file the stored value came from replaces it
+        (28a-4). A legacy raw value (stored before T2) is replaced silently.
+        """
+        if not dob:
+            return []
+        metadata = get_patient_metadata(self._db_path, patient_id)
+        stored = _iso_date(metadata.get("date_of_birth"))
+        if stored is not None and metadata.get("date_of_birth_source") != file_path:
+            if stored.isoformat() == dob:
+                return []
+            return [_DOB_CONFLICT_MSG.format(
+                new=format_date(date.fromisoformat(dob)), stored=format_date(stored))]
+        upsert_patient_metadata(self._db_path, patient_id, "date_of_birth", dob)
+        upsert_patient_metadata(self._db_path, patient_id, "date_of_birth_source", file_path)
+        return []
+
     def _delete_stale_data(self, file_path: str) -> bool:
         """Delete previously stored rows/vectors for a re-ingested file.
 
@@ -433,10 +486,9 @@ class IngestionWorkflow(Workflow):
             return StopEvent(result=IngestResult("error", _STALE_DELETE_MSG))
 
         # Upsert static patient metadata
-        if header.get("date_of_birth"):
-            upsert_patient_metadata(
-                self._db_path, patient_id, "date_of_birth", header["date_of_birth"]
-            )
+        data["warnings"] = data.get("warnings", []) + self._store_date_of_birth(
+            patient_id, header.get("date_of_birth"), file_path
+        )
         if header.get("hmo_name"):
             upsert_patient_metadata(
                 self._db_path, patient_id, "hmo_name", header["hmo_name"]
@@ -522,10 +574,9 @@ class IngestionWorkflow(Workflow):
 
         # Upsert static patient metadata from treatment plan header
         header = data.get("header", {})
-        if header.get("date_of_birth"):
-            upsert_patient_metadata(
-                self._db_path, patient_id, "date_of_birth", header["date_of_birth"]
-            )
+        data["warnings"] = data.get("warnings", []) + self._store_date_of_birth(
+            patient_id, header.get("date_of_birth"), data["file_path"]
+        )
         upsert_patient_metadata(
             self._db_path, patient_id, "display_name", data["patient_folder_name"]
         )
