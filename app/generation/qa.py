@@ -2,6 +2,7 @@
 from llama_index.core.workflow import Workflow, StartEvent, StopEvent, step, Context, Event
 from llama_index.llms.anthropic import Anthropic as LlamaAnthropic
 from typing import Union
+import asyncio
 import logging
 
 from app.query.extractor import extract_query_params
@@ -62,7 +63,8 @@ class QueryWorkflow(Workflow):
 
     @step
     async def extract_step(self, ctx: Context, ev: QueryStartEvent) -> Union[QueryParamsEvent, StopEvent]:
-        params = extract_query_params(ev.question, ev.patient_id, self._config)
+        # Sync API calls run in a worker thread so they don't block Gradio's event loop (T6, item 32).
+        params = await asyncio.to_thread(extract_query_params, ev.question, ev.patient_id, self._config)
         if params is None:
             return StopEvent(result=CANT_UNDERSTAND_MESSAGE)
         await ctx.store.set("question", ev.question)
@@ -75,7 +77,7 @@ class QueryWorkflow(Workflow):
 
     @step
     async def retrieve_step(self, ctx: Context, ev: RouteDecisionEvent) -> Union[RetrievalResultEvent, EmptyResultEvent]:
-        result = retrieve(ev.decision, self._config, self._db_path, self._pinecone_index)
+        result = await asyncio.to_thread(retrieve, ev.decision, self._config, self._db_path, self._pinecone_index)
         if isinstance(result, str):
             return EmptyResultEvent(message=result)
         if result.count == 0:
