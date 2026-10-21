@@ -1,15 +1,19 @@
 """
 db.py — SQLite CRUD module for the clinical RAG system.
 
-All functions open and close their own sqlite3.connect(db_path) connection.
+All functions open and close their own sqlite3.connect(db_path) connection,
+except that the write helpers (and get_patient_metadata) take an optional
+*conn*: inside `with transaction(db_path) as conn:` they join that one
+transaction instead (PLAN.md 24a).
 Use get_config() from app.config only if a caller passes no db_path;
 callers are expected to supply the db_path directly.
 """
 
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator, Optional
 
 from app.storage.models import (
     DomainFinding,
@@ -78,6 +82,35 @@ CREATE TABLE IF NOT EXISTS patient_metadata (
 
 
 # ---------------------------------------------------------------------------
+# Transactions (PLAN.md 24a, T2 6-ב)
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def transaction(db_path: str) -> Iterator[sqlite3.Connection]:
+    """One SQLite transaction: committed when the block ends, rolled back on any error."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("BEGIN")
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _connection(db_path: str, conn: Optional[sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
+    """*conn* when given (the caller's transaction commits), else a transaction of its own."""
+    if conn is not None:
+        yield conn
+    else:
+        with transaction(db_path) as own:
+            yield own
+
+
+# ---------------------------------------------------------------------------
 # Schema initialisation
 # ---------------------------------------------------------------------------
 
@@ -103,11 +136,13 @@ def get_file_hash(db_path: str, file_path: str) -> Optional[str]:
     return row[0] if row else None
 
 
-def mark_file_ingested(db_path: str, file_path: str, file_hash: str) -> None:
+def mark_file_ingested(
+    db_path: str, file_path: str, file_hash: str, conn: Optional[sqlite3.Connection] = None
+) -> None:
     """Record that *file_path* has been successfully ingested with *file_hash*."""
     ingested_at = datetime.now(timezone.utc).isoformat()
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path, conn) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO ingested_files (file_path, file_hash, ingested_at)
@@ -115,7 +150,6 @@ def mark_file_ingested(db_path: str, file_path: str, file_hash: str) -> None:
                 """,
                 (file_path, file_hash, ingested_at),
             )
-            conn.commit()
         logger.info("Marked file as ingested: %s", file_path)
     except (sqlite3.IntegrityError, sqlite3.OperationalError) as exc:
         logger.error("Failed to mark file ingested [%s]: %s", file_path, exc)
@@ -126,10 +160,12 @@ def mark_file_ingested(db_path: str, file_path: str, file_hash: str) -> None:
 # Write helpers
 # ---------------------------------------------------------------------------
 
-def insert_family_a_chunk(db_path: str, chunk: FamilyAChunk) -> None:
+def insert_family_a_chunk(
+    db_path: str, chunk: FamilyAChunk, conn: Optional[sqlite3.Connection] = None
+) -> None:
     """INSERT OR REPLACE a FamilyAChunk into document_sections."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path, conn) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO document_sections
@@ -146,7 +182,6 @@ def insert_family_a_chunk(db_path: str, chunk: FamilyAChunk) -> None:
                     chunk.source_file_path,
                 ),
             )
-            conn.commit()
         logger.info(
             "Inserted document_sections row: patient=%s type=%s date=%s section=%s",
             chunk.patient_id,
@@ -159,10 +194,12 @@ def insert_family_a_chunk(db_path: str, chunk: FamilyAChunk) -> None:
         raise
 
 
-def insert_treatment_goals(db_path: str, chunk: TreatmentGoalsChunk) -> None:
+def insert_treatment_goals(
+    db_path: str, chunk: TreatmentGoalsChunk, conn: Optional[sqlite3.Connection] = None
+) -> None:
     """INSERT OR REPLACE a TreatmentGoalsChunk into treatment_goals."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path, conn) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO treatment_goals
@@ -178,7 +215,6 @@ def insert_treatment_goals(db_path: str, chunk: TreatmentGoalsChunk) -> None:
                     chunk.source_file_path,
                 ),
             )
-            conn.commit()
         logger.info(
             "Inserted treatment_goals row: patient=%s date=%s",
             chunk.patient_id,
@@ -189,10 +225,12 @@ def insert_treatment_goals(db_path: str, chunk: TreatmentGoalsChunk) -> None:
         raise
 
 
-def insert_treatment_session(db_path: str, chunk: TreatmentSessionChunk) -> None:
+def insert_treatment_session(
+    db_path: str, chunk: TreatmentSessionChunk, conn: Optional[sqlite3.Connection] = None
+) -> None:
     """INSERT OR REPLACE a TreatmentSessionChunk into treatment_sessions."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path, conn) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO treatment_sessions
@@ -208,7 +246,6 @@ def insert_treatment_session(db_path: str, chunk: TreatmentSessionChunk) -> None
                     chunk.source_file_path,
                 ),
             )
-            conn.commit()
         logger.info(
             "Inserted treatment_sessions row: patient=%s date=%s",
             chunk.patient_id,
@@ -219,10 +256,12 @@ def insert_treatment_session(db_path: str, chunk: TreatmentSessionChunk) -> None
         raise
 
 
-def insert_domain_finding(db_path: str, finding: DomainFinding) -> None:
+def insert_domain_finding(
+    db_path: str, finding: DomainFinding, conn: Optional[sqlite3.Connection] = None
+) -> None:
     """INSERT OR REPLACE a DomainFinding into domain_findings."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path, conn) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO domain_findings
@@ -237,7 +276,6 @@ def insert_domain_finding(db_path: str, finding: DomainFinding) -> None:
                     finding.parent_domain,
                 ),
             )
-            conn.commit()
         logger.info(
             "Inserted domain_findings row: patient=%s date=%s domain=%s parent=%s",
             finding.patient_id,
@@ -251,11 +289,12 @@ def insert_domain_finding(db_path: str, finding: DomainFinding) -> None:
 
 
 def upsert_patient_metadata(
-    db_path: str, patient_id: str, field_name: str, value: str
+    db_path: str, patient_id: str, field_name: str, value: str,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> None:
     """INSERT OR REPLACE a single patient_metadata field."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path, conn) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO patient_metadata (patient_id, field_name, value)
@@ -263,7 +302,6 @@ def upsert_patient_metadata(
                 """,
                 (patient_id, field_name, value),
             )
-            conn.commit()
         logger.info(
             "Upserted patient_metadata: patient=%s field=%s", patient_id, field_name
         )
@@ -347,7 +385,9 @@ def get_pinecone_ids_for_file(db_path: str, file_path: str) -> list[str]:
     return [row[0] for row in rows]
 
 
-def delete_rows_for_file(db_path: str, file_path: str) -> None:
+def delete_rows_for_file(
+    db_path: str, file_path: str, conn: Optional[sqlite3.Connection] = None
+) -> None:
     """Delete all rows produced by *file_path* across all content tables in one transaction.
 
     domain_findings does not carry source_file_path (per schema). Its rows share
@@ -362,9 +402,7 @@ def delete_rows_for_file(db_path: str, file_path: str) -> None:
     the same date share domain_findings rows (PLAN.md T0 part 3, decision 5).
     """
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("BEGIN")
-
+        with _connection(db_path, conn) as conn:
             # Step 1: collect (patient_id, session_date) pairs from document_sections
             # BEFORE deleting them — needed to cascade into domain_findings.
             pairs = conn.execute(
@@ -397,7 +435,6 @@ def delete_rows_for_file(db_path: str, file_path: str) -> None:
                 "DELETE FROM treatment_sessions WHERE source_file_path = ?",
                 (file_path,),
             )
-            conn.commit()
 
         logger.info("Deleted all rows for file: %s", file_path)
     except (sqlite3.IntegrityError, sqlite3.OperationalError) as exc:
@@ -719,9 +756,11 @@ def get_patient_list(db_path: str) -> list[dict]:
     return [{"patient_id": r[0], "display_name": r[1]} for r in rows]
 
 
-def get_patient_metadata(db_path: str, patient_id: str) -> dict[str, str]:
+def get_patient_metadata(
+    db_path: str, patient_id: str, conn: Optional[sqlite3.Connection] = None
+) -> dict[str, str]:
     """Return all patient_metadata fields for *patient_id* as {field_name: value}."""
-    with sqlite3.connect(db_path) as conn:
+    with _connection(db_path, conn) as conn:
         rows = conn.execute(
             "SELECT field_name, value FROM patient_metadata WHERE patient_id = ?",
             (patient_id,),
