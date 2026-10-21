@@ -1,9 +1,14 @@
-"""Plan header fields prepended to treatment-plan answers (PLAN.md O4.2, T2 5-ו)."""
+"""Plan header fields + goals records prepended to treatment-plan answers (PLAN.md O4.2, T2 5-ו, 5-ז)."""
 
 from app.prompts.qa import NO_RESULTS_MESSAGE
 from app.query import retrieval
-from app.storage.db import insert_family_a_chunk, insert_treatment_session
-from app.storage.models import FamilyAChunk, QueryParams, TreatmentSessionChunk
+from app.storage.db import insert_family_a_chunk, insert_treatment_goals, insert_treatment_session
+from app.storage.models import (
+    FamilyAChunk,
+    QueryParams,
+    TreatmentGoalsChunk,
+    TreatmentSessionChunk,
+)
 
 _PID = "p1"
 _HEADER = "[מטרת_על מתאריך 2026-03-01]\nשיפור השיח"
@@ -56,6 +61,22 @@ def test_compare_puts_plan_header_first_in_before(db_path):            # 5-ו (2
         db_path, QueryParams(_PID, "compare_progress", date_from="2026-03-10"))
     assert result.chunks["before"][0] == _HEADER
     assert _HEADER not in result.chunks["after"]
+
+
+def test_goals_records_follow_the_plan_header(db_path):                 # 5-ז
+    _seed(db_path)
+    for d, text in (("2026-03-10", "תחביר: משפט מורכב"), ("2026-03-02", "לקסיקון: שליפה")):
+        insert_treatment_goals(db_path, TreatmentGoalsChunk(
+            patient_id=_PID, session_date=d, goals_text_deidentified=text,
+            source_file_path="/plan.docx",
+        ))
+    result = retrieval._fetch_treatment_sessions(
+        db_path, QueryParams(_PID, "compare_progress"))
+    assert result.chunks[:3] == [
+        _HEADER,
+        "[יעדי טיפול מתאריך 2026-03-02]\nלקסיקון: שליפה",
+        "[יעדי טיפול מתאריך 2026-03-10]\nתחביר: משפט מורכב",
+    ]
 
 
 def test_no_sessions_still_means_no_results(db_path):                  # 5-ו (1)
