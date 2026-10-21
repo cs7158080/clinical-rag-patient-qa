@@ -1,7 +1,12 @@
 """Tests for the treatment-plan parser (PLAN.md items 15–24a, section 7 T2)."""
 
+import asyncio
+import sqlite3
+from types import SimpleNamespace
+
 import pytest
 
+from app.ingestion import pipeline
 from app.ingestion.adapter_b import parse_treatment_plan
 from app.ingestion.dates import DateError
 from app.ingestion.result import ParseBlocked
@@ -265,3 +270,67 @@ def test_signature_block_is_not_stored(tmp_path):                          # N9,
     ]))
     assert [b["session_text"] for b in parsed["session_blocks"]] == [
         "מפגש.", "מפגש שני.", "מפגש שלישי."]
+
+
+def test_header_fields_become_plan_sections(tmp_path):                 # 19a, 5-א, 5-ב, 1-ג
+    parsed = _parse(_plan(tmp_path, "01/03/2026", [
+        "מטרת על: שיפור השיח\nהערות: לעקוב אחר ההבנה",   # one paragraph (Shift+Enter), as חנה
+        "קשר בין המפגשים: טלפון כל שבועיים",
+        "05/03/2026", "מפגש.",
+    ]))
+    assert parsed["sections"] == {
+        "מטרת_על": "שיפור השיח",
+        "הערות": "לעקוב אחר ההבנה",
+        "קשר_בין_המפגשים": "טלפון כל שבועיים",
+        "תאריך_התחלת_הטיפול": "01/03/2026",
+    }
+    assert parsed["sections_date"] == "2026-03-01"
+
+
+def test_empty_header_fields_are_not_sections(tmp_path):                # 5-א
+    parsed = _parse(_plan(tmp_path, "", ["מטרת על: ", "הערות:", "05/03/2026", "מפגש."]))
+    assert parsed["sections"] == {}
+
+
+@pytest.mark.parametrize("body, expected", [                             # 5-ג
+    ([Table([["מטרות בתאריך 10/03/2026"], ["תחביר", "משפט"]]),
+      Table([["מטרות בתאריך 05/03/2026"], ["תחביר", "משפט מורכב"]]),
+      "08/03/2026", "מפגש."], "2026-03-05"),                  # no start → earliest goals date
+    (["08/03/2026", "מפגש.", "09/03/2026", "מפגש."], "2026-03-08"),   # → first session
+])
+def test_sections_date_without_start_date(tmp_path, body, expected):
+    parsed = _parse(_plan(tmp_path, "", ["מטרת על: שיפור השיח", *body]))
+    assert parsed["sections_date"] == expected
+
+
+def test_header_fields_are_read_only_before_the_first_date(tmp_path):   # 5-ה
+    parsed = _parse(_plan(tmp_path, "01/03/2026", ["05/03/2026", "הערות: לבקש מהגננת דיווח."]))
+    assert parsed["sections"] == {"תאריך_התחלת_הטיפול": "01/03/2026"}
+    assert parsed["session_blocks"][0]["session_text"] == "הערות: לבקש מהגננת דיווח."
+
+
+def test_plan_header_fields_are_stored_as_document_sections(tmp_path, db_path, monkeypatch):  # 19a, 5-ד
+    from app.deidentification import validation
+
+    patient = tmp_path / "patients" / _PATIENT
+    patient.mkdir(parents=True)
+    _plan(patient, "01/03/2026", ["מטרת על: שיפור השיח", "05/03/2026", "מפגש."])
+    monkeypatch.setattr(pipeline, "load_ner_model", lambda models_dir: None)
+    monkeypatch.setattr(validation, "_check_ner_rescan", lambda text: True)
+    monkeypatch.setattr(pipeline, "get_cohere_embedding", lambda text, key, model: [0.0])
+    monkeypatch.setattr(pipeline, "upsert_vectors", lambda index, vectors: None)
+    config = SimpleNamespace(models_dir="", run_mode="test", data_dir=str(tmp_path),
+                             cohere_api_key="", cohere=SimpleNamespace(model=""))
+
+    [(_, result)] = asyncio.run(pipeline.run_ingestion(
+        [str(tmp_path / "patients")], config, {}, db_path, object()))
+
+    assert result.status == "ok", result.message
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT template_type, session_date, section, text_deidentified "
+            "FROM document_sections ORDER BY section").fetchall()
+    assert rows == [
+        ("treatment_plan", "2026-03-01", "מטרת_על", "שיפור השיח"),
+        ("treatment_plan", "2026-03-01", "תאריך_התחלת_הטיפול", "01/03/2026"),
+    ]

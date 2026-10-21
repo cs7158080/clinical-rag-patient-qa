@@ -248,15 +248,16 @@ class IngestionWorkflow(Workflow):
         if "parent_domains" not in deid_data:
             deid_data["parent_domains"] = {}
 
-        # Apply de-identification to all text fields based on template type
-        if ev.template_type in ("diagnosis", "clinic_visit_summary"):
-            deid_sections: dict[str, str] = {}
-            for section_key, text in deid_data.get("sections", {}).items():
-                deid_sections[section_key] = deidentify_text(
-                    text, patient_folder_name, variants, self._reid_map, file_path
-                )
-            deid_data["sections"] = deid_sections
+        # Apply de-identification to all text fields based on template type.
+        # Sections: Family A document sections, or treatment-plan header fields (T2 5-ד)
+        deid_data["sections"] = {
+            section_key: deidentify_text(
+                text, patient_folder_name, variants, self._reid_map, file_path
+            )
+            for section_key, text in deid_data.get("sections", {}).items()
+        }
 
+        if ev.template_type in ("diagnosis", "clinic_visit_summary"):
             deid_domains: dict[str, str] = {}
             for domain, text in deid_data.get("domains", {}).items():
                 deid_domains[domain] = deidentify_text(
@@ -296,11 +297,11 @@ class IngestionWorkflow(Workflow):
         # Final deterministic sweep — the reid map now contains everything
         # discovered in ALL fields of this file (and previous files), so a
         # name NER missed in one block but caught in another is still replaced.
+        deid_data["sections"] = {
+            k: sweep_reid_values(v, self._reid_map)
+            for k, v in deid_data["sections"].items()
+        }
         if ev.template_type in ("diagnosis", "clinic_visit_summary"):
-            deid_data["sections"] = {
-                k: sweep_reid_values(v, self._reid_map)
-                for k, v in deid_data["sections"].items()
-            }
             deid_data["domains"] = {
                 k: sweep_reid_values(v, self._reid_map)
                 for k, v in deid_data["domains"].items()
@@ -600,6 +601,17 @@ class IngestionWorkflow(Workflow):
                 source_file_path=file_path,
             )
             insert_treatment_session(self._db_path, chunk)
+
+        # Plan header fields (19a, O4.1) — document_sections rows, one date (T2 5-ג)
+        for section_key, text in data.get("sections", {}).items():
+            insert_family_a_chunk(self._db_path, FamilyAChunk(
+                patient_id=patient_id,
+                template_type="treatment_plan",
+                session_date=data["sections_date"],
+                section=section_key,
+                text_deidentified=text,
+                source_file_path=file_path,
+            ))
 
         mark_file_ingested(self._db_path, file_path, data["file_hash"])
         save_reid_map(

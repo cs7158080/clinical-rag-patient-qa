@@ -31,25 +31,27 @@ logger = logging.getLogger(__name__)
 # Header extraction
 # ---------------------------------------------------------------------------
 
-def extract_treatment_header(doc) -> dict:
-    """Extract file-level header fields from the first paragraphs of *doc*.
+# Plan header field → document_sections section key (19a, O4.1)
+_HEADER_SECTIONS = {"main_goal": "מטרת_על", "notes": "הערות", "between_sessions": "קשר_בין_המפגשים"}
+_START_DATE_SECTION = "תאריך_התחלת_הטיפול"
+
+
+def extract_treatment_header(lines: list[str]) -> dict:
+    """Extract file-level header fields from *lines* — the header region: the
+    lines before the first date line or table (T2 5-ה).
 
     Fields
     ------
-    name           : text after 'שם:' / 'שם '
-    date_of_birth  : text after 'ת.ל.:'
-    start_date     : text after 'תאריך התחלת הטיפול:' (raw — see resolve_start_date)
-    main_goal      : text after 'מטרת על:'
-    notes          : text after 'הערות:'
-
-    Parameters
-    ----------
-    doc:
-        A python-docx Document object.
+    name             : text after 'שם:' / 'שם '
+    date_of_birth    : text after 'ת.ל.:'
+    start_date       : text after 'תאריך התחלת הטיפול:' (raw — see resolve_start_date)
+    main_goal        : text after 'מטרת על:'
+    notes            : text after 'הערות:'
+    between_sessions : text after 'קשר בין המפגשים:'
 
     Returns
     -------
-    Dict with the five keys above.  All values are str or None.
+    Dict with the six keys above.  All values are str or None.
     """
     result: dict[str, Optional[str]] = {
         "name": None,
@@ -57,18 +59,19 @@ def extract_treatment_header(doc) -> dict:
         "start_date": None,
         "main_goal": None,
         "notes": None,
+        "between_sessions": None,
     }
 
     patterns = [
-        ("name",          re.compile(r"שם\s*[:\s]\s*(.+)")),
-        ("date_of_birth", re.compile(r"ת\.ל\.\s*:\s*(.+)")),
-        ("start_date",    re.compile(r"תאריך התחלת הטיפול\s*:\s*(.+)")),
-        ("main_goal",     re.compile(r"מטרת על\s*:\s*(.+)")),
-        ("notes",         re.compile(r"הערות\s*:\s*(.+)")),
+        ("name",             re.compile(r"שם\s*[:\s]\s*(.+)")),
+        ("date_of_birth",    re.compile(r"ת\.ל\.\s*:\s*(.+)")),
+        ("start_date",       re.compile(r"תאריך התחלת הטיפול\s*:\s*(.+)")),
+        ("main_goal",        re.compile(r"מטרת על\s*:\s*(.+)")),
+        ("notes",            re.compile(r"הערות\s*:\s*(.+)")),
+        ("between_sessions", re.compile(r"קשר בין המפגשים\s*:\s*(.+)")),
     ]
 
-    # Header lives in the first 15 paragraphs; each may hold several lines (T2 1-ג).
-    for text in _lines(doc.paragraphs[:15]):
+    for text in lines:
         for field_key, pattern in patterns:
             if result[field_key] is not None:
                 continue
@@ -273,6 +276,8 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         "header": dict,
         "goals_rows": list of {"session_date": str, "goals_text": str},
         "session_blocks": list of {"session_date": str, "session_text": str},
+        "sections": dict,         # header field section key -> text (19a, O4.1)
+        "sections_date": str,     # ISO date of the sections rows (T2 5-ג)
         "file_path": str,
         "warnings": list[str],    # Hebrew, shown in the load report
     }
@@ -285,10 +290,6 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         logger.error("parse_treatment_plan: failed to open document %s: %s", file_path, exc)
         raise
 
-    header = extract_treatment_header(doc)
-    start, warnings = resolve_start_date(header["start_date"])
-    header["start_date"] = start.isoformat() if start else None
-
     # ------------------------------------------------------------------
     # Body, in document order: goals tables and sessions
     # ------------------------------------------------------------------
@@ -298,6 +299,7 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
     written: list[ParsedDate] = []
     sessions: list[tuple[int, list[str]]] = []      # (index in written, text lines)
     goals: list[tuple[Optional[int], str]] = []     # (index in written, None = undated; text)
+    header_lines: list[str] = []                    # header region (T2 5-ה)
     n_tables = 0
     in_signature = False
     for block in doc.iter_inner_content():
@@ -319,10 +321,16 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
                 written.append(parsed)
                 sessions.append((len(written) - 1, []))
                 in_signature = False
+            elif not sessions and not n_tables:
+                header_lines.append(line)
             elif line.startswith(_SIGNATURE_START) or _SIGNATURE_SENTINEL in line:
                 in_signature = True
             elif sessions and not in_signature:
                 sessions[-1][1].append(line)
+
+    header = extract_treatment_header(header_lines)
+    start, warnings = resolve_start_date(header["start_date"])
+    header["start_date"] = start.isoformat() if start else None
 
     # Future / before-start warnings (21a).
     resolved = resolve_dates(written, start=start)
@@ -353,6 +361,16 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
     if not goals_rows and not session_blocks:
         raise ParseBlocked(_NO_CONTENT_MSG)
 
+    # Plan header fields → document_sections rows (19a, O4.1; T2 5-א … 5-ג)
+    sections = {key: header[field] for field, key in _HEADER_SECTIONS.items() if header[field]}
+    if start is not None:
+        sections[_START_DATE_SECTION] = format_date(start)
+    sections_date = (
+        header["start_date"]
+        or min((g["session_date"] for g in goals_rows), default=None)
+        or session_blocks[0]["session_date"]
+    )
+
     logger.info(
         "parse_treatment_plan: parsed %s — goals_rows=%d session_blocks=%d",
         file_path,
@@ -366,6 +384,8 @@ def parse_treatment_plan(file_path: str, patient_folder_name: str) -> dict:
         "header": header,
         "goals_rows": goals_rows,
         "session_blocks": session_blocks,
+        "sections": sections,
+        "sections_date": sections_date,
         "file_path": file_path,
         "warnings": warnings,
     }
