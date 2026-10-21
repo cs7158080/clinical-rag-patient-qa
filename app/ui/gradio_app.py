@@ -14,6 +14,7 @@ from app.generation.qa import run_query
 from app.generation.summary_generator import run_generate_summary
 from app.ingestion.pipeline import run_ingestion
 from app.ingestion.result import format_report
+from app.ui.patient_files import list_patient_files
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +72,13 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
         return dates
 
     def get_file_choices(patient_id: str):
+        """Return ([(label, path)], status) — every file in the patient's folder on disk."""
         if not patient_id:
-            return []
-        paths = db.get_patient_files(db_path, patient_id)
-        return [(os.path.basename(p), p) for p in paths]
+            return [], ""
+        display_name = db.get_patient_metadata(db_path, patient_id).get("display_name", "")
+        return list_patient_files(config.patients_roots, display_name)
 
-    def open_file_in_word(file_path: str):
+    def open_file(file_path: str):
         if not file_path:
             return "אנא בחרי קובץ"
         if not os.path.isfile(file_path):
@@ -90,12 +92,13 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
 
     def on_patient_change(patient_id):
         dates = get_session_dates(patient_id)   # newest first
-        file_choices = get_file_choices(patient_id)
+        file_choices, files_status = get_file_choices(patient_id)
         return (
             gr.update(choices=dates, value=dates[-1] if dates else None),  # from = oldest
             gr.update(choices=dates, value=dates[0] if dates else None),   # to = newest
             "",
             gr.update(choices=file_choices, value=file_choices[0][1] if file_choices else None),
+            files_status,
         )
 
     async def ask_question(question: str, patient_id: str):
@@ -157,7 +160,7 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
             return "אירעה שגיאה ביצירת הסיכום"
 
     initial_patients = get_patient_choices()
-    initial_files = get_file_choices(initial_patients[0][1] if initial_patients else None)
+    initial_files, initial_files_status = get_file_choices(initial_patients[0][1] if initial_patients else None)
 
     with gr.Blocks(
         title="מערכת שאלות ותשובות — תיקי מטופלים",
@@ -227,9 +230,10 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
                     value=initial_files[0][1] if initial_files else None,
                     type="value",
                 )
-                open_file_btn = gr.Button("פתח ב-Word", variant="primary")
+                open_file_btn = gr.Button("פתח קובץ", variant="primary")
                 open_file_status = gr.Textbox(
                     label="סטטוס",
+                    value=initial_files_status,
                     interactive=False,
                 )
 
@@ -247,11 +251,11 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
         patient_dropdown.change(
             fn=on_patient_change,
             inputs=[patient_dropdown],
-            outputs=[date_from_dropdown, date_to_dropdown, answer_output, file_dropdown],
+            outputs=[date_from_dropdown, date_to_dropdown, answer_output, file_dropdown, open_file_status],
         )
 
         open_file_btn.click(
-            fn=open_file_in_word,
+            fn=open_file,
             inputs=[file_dropdown],
             outputs=[open_file_status],
         )
@@ -267,7 +271,7 @@ def build_app(config: AppConfig, db_path: str, pinecone_index, reid_map_path: st
             inputs=[patient_dropdown, date_from_dropdown, date_to_dropdown],
             outputs=[generate_status],
         ).then(
-            fn=lambda pid: gr.update(choices=get_file_choices(pid)) if pid else gr.update(),
+            fn=lambda pid: gr.update(choices=get_file_choices(pid)[0]) if pid else gr.update(),
             inputs=[patient_dropdown],
             outputs=[file_dropdown],
         )
