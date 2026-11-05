@@ -9,7 +9,7 @@ Usage:
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from functools import lru_cache
 
 import yaml
 from dotenv import load_dotenv
@@ -79,16 +79,10 @@ class AppConfig:
 
 
 # ---------------------------------------------------------------------------
-# Internal singleton cache
-# ---------------------------------------------------------------------------
-
-_config: Optional[AppConfig] = None
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+@lru_cache
 def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppConfig:
     """Return the cached AppConfig singleton.
 
@@ -100,12 +94,10 @@ def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppC
     3. Builds and caches an AppConfig instance.
     4. Raises ValueError if any required environment variable is absent.
 
-    Subsequent calls return the cached instance without re-reading files.
+    Subsequent calls with the same arguments return the cached instance
+    without re-reading files (functools.lru_cache). Tests reset it with
+    get_config.cache_clear().
     """
-    global _config
-    if _config is not None:
-        return _config
-
     # Step 1 — load .env (best-effort; real key from environment wins)
     load_dotenv(dotenv_path=env_path)
 
@@ -190,7 +182,7 @@ def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppC
             "or a non-empty list of strings."
         )
 
-    _config = AppConfig(
+    return AppConfig(
         patients_roots=patients_roots,
         data_dir=raw.get("data_dir", "./data"),
         logs_dir=raw.get("logs_dir", "./logs"),
@@ -205,14 +197,6 @@ def get_config(config_path: str = "config.yaml", env_path: str = ".env") -> AppC
         anthropic_api_key=anthropic_api_key,
         pinecone_api_key=pinecone_api_key,
     )
-
-    return _config
-
-
-def reset_config() -> None:
-    """Clear the cached singleton (useful in tests)."""
-    global _config
-    _config = None
 
 
 # ---------------------------------------------------------------------------

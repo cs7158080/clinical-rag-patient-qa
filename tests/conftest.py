@@ -55,10 +55,10 @@ def config():
     if missing:
         pytest.skip(f"Missing environment variables: {', '.join(missing)}")
 
-    from app.config import get_config, reset_config
+    from app.config import get_config
 
-    # Reset singleton so each test that uses this fixture gets a fresh load.
-    reset_config()
+    # Reset the cache so each test that uses this fixture gets a fresh load.
+    get_config.cache_clear()
     try:
         cfg = get_config()
     except Exception as exc:  # noqa: BLE001
@@ -66,5 +66,5 @@ def config():
 
     yield cfg
 
-    # Clean up singleton after the test so it does not bleed into others.
-    reset_config()
+    # Clean up the cache after the test so it does not bleed into others.
+    get_config.cache_clear()
